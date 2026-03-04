@@ -1,0 +1,533 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.llm.ollama;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.core5.util.Timeout;
+import org.codelibs.fess.llm.LlmChatRequest;
+import org.codelibs.fess.llm.LlmChatResponse;
+import org.codelibs.fess.llm.LlmException;
+import org.codelibs.fess.llm.LlmMessage;
+import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.unit.UnitFessTestCase;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
+
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+
+public class OllamaLlmClientTest extends UnitFessTestCase {
+
+    private TestableOllamaLlmClient client;
+
+    @Override
+    public void setUp(final TestInfo testInfo) throws Exception {
+        super.setUp(testInfo);
+        client = new TestableOllamaLlmClient();
+    }
+
+    @Override
+    public void tearDown(final TestInfo testInfo) throws Exception {
+        if (client != null) {
+            client.destroy();
+        }
+        super.tearDown(testInfo);
+    }
+
+    @Test
+    public void test_getName() {
+        assertEquals("ollama", client.getName());
+    }
+
+    @Test
+    public void test_isModelAvailable_withMatchingModel() {
+        client.setTestModel("llama3:latest");
+        final String responseBody = "{\"models\":[{\"name\":\"llama3:latest\"},{\"name\":\"mistral:latest\"}]}";
+        assertTrue(client.isModelAvailable(responseBody));
+    }
+
+    @Test
+    public void test_isModelAvailable_withNonMatchingModel() {
+        client.setTestModel("gpt-4");
+        final String responseBody = "{\"models\":[{\"name\":\"llama3:latest\"},{\"name\":\"mistral:latest\"}]}";
+        assertFalse(client.isModelAvailable(responseBody));
+    }
+
+    @Test
+    public void test_isModelAvailable_withBlankModel() {
+        client.setTestModel("");
+        final String responseBody = "{\"models\":[{\"name\":\"llama3:latest\"}]}";
+        assertTrue(client.isModelAvailable(responseBody));
+    }
+
+    @Test
+    public void test_isModelAvailable_withNullModel() {
+        client.setTestModel(null);
+        final String responseBody = "{\"models\":[{\"name\":\"llama3:latest\"}]}";
+        assertTrue(client.isModelAvailable(responseBody));
+    }
+
+    @Test
+    public void test_isModelAvailable_withEmptyModels() {
+        client.setTestModel("llama3:latest");
+        final String responseBody = "{\"models\":[]}";
+        assertFalse(client.isModelAvailable(responseBody));
+    }
+
+    @Test
+    public void test_isModelAvailable_withNoModelsField() {
+        client.setTestModel("llama3:latest");
+        final String responseBody = "{}";
+        assertFalse(client.isModelAvailable(responseBody));
+    }
+
+    @Test
+    public void test_isModelAvailable_withInvalidJson() {
+        client.setTestModel("llama3:latest");
+        final String responseBody = "invalid json";
+        assertTrue(client.isModelAvailable(responseBody));
+    }
+
+    @Test
+    public void test_convertMessage() {
+        final LlmMessage message = new LlmMessage("user", "Hello");
+        final Map<String, String> result = client.convertMessage(message);
+        assertEquals("user", result.get("role"));
+        assertEquals("Hello", result.get("content"));
+    }
+
+    @Test
+    public void test_convertMessage_systemRole() {
+        final LlmMessage message = new LlmMessage("system", "You are a helpful assistant.");
+        final Map<String, String> result = client.convertMessage(message);
+        assertEquals("system", result.get("role"));
+        assertEquals("You are a helpful assistant.", result.get("content"));
+    }
+
+    @Test
+    public void test_convertMessage_assistantRole() {
+        final LlmMessage message = new LlmMessage("assistant", "I can help you.");
+        final Map<String, String> result = client.convertMessage(message);
+        assertEquals("assistant", result.get("role"));
+        assertEquals("I can help you.", result.get("content"));
+    }
+
+    @Test
+    public void test_buildRequestBody_withDefaults() {
+        client.setTestModel("llama3:latest");
+        client.setTestTemperature(0.7);
+        client.setTestMaxTokens(1000);
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        assertEquals("llama3:latest", body.get("model"));
+        assertEquals(Boolean.FALSE, body.get("stream"));
+        assertNotNull(body.get("messages"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, String>> messages = (List<Map<String, String>>) body.get("messages");
+        assertEquals(1, messages.size());
+        assertEquals("user", messages.get(0).get("role"));
+        assertEquals("Hello", messages.get(0).get("content"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> options = (Map<String, Object>) body.get("options");
+        assertNotNull(options);
+        assertEquals(0.7, options.get("temperature"));
+        assertEquals(1000, options.get("num_predict"));
+    }
+
+    @Test
+    public void test_buildRequestBody_withRequestOverrides() {
+        client.setTestModel("llama3:latest");
+        client.setTestTemperature(0.7);
+        client.setTestMaxTokens(1000);
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.setModel("mistral:latest");
+        request.setTemperature(0.5);
+        request.setMaxTokens(500);
+
+        final Map<String, Object> body = client.buildRequestBody(request, true);
+        assertEquals("mistral:latest", body.get("model"));
+        assertEquals(Boolean.TRUE, body.get("stream"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> options = (Map<String, Object>) body.get("options");
+        assertNotNull(options);
+        assertEquals(0.5, options.get("temperature"));
+        assertEquals(500, options.get("num_predict"));
+    }
+
+    @Test
+    public void test_buildRequestBody_withMultipleMessages() {
+        client.setTestModel("llama3:latest");
+        client.setTestTemperature(0.7);
+        client.setTestMaxTokens(1000);
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("system", "You are a helpful assistant."));
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.addMessage(new LlmMessage("assistant", "Hi! How can I help?"));
+        request.addMessage(new LlmMessage("user", "Tell me about Fess."));
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, String>> messages = (List<Map<String, String>>) body.get("messages");
+        assertEquals(4, messages.size());
+    }
+
+    @Test
+    public void test_init_and_destroy() {
+        final TestableOllamaLlmClient testClient = new TestableOllamaLlmClient();
+        testClient.setTestApiUrl("http://localhost:11434");
+        testClient.setTestModel("llama3:latest");
+        testClient.setTestTimeout(30000);
+        // init() requires ComponentUtil, so we test the HTTP client setup directly
+        assertNull(testClient.getTestHttpClient());
+        testClient.initHttpClient();
+        assertNotNull(testClient.getTestHttpClient());
+        testClient.destroy();
+        assertNull(testClient.getTestHttpClient());
+    }
+
+    @Test
+    public void test_destroy_withNullHttpClient() {
+        final TestableOllamaLlmClient testClient = new TestableOllamaLlmClient();
+        assertNull(testClient.getTestHttpClient());
+        // Should not throw
+        testClient.destroy();
+        assertNull(testClient.getTestHttpClient());
+    }
+
+    @Test
+    public void test_chat_success() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String responseJson = "{\"message\":{\"content\":\"Hello! How can I help?\"},\"done_reason\":\"stop\","
+                    + "\"model\":\"llama3:latest\",\"prompt_eval_count\":10,\"eval_count\":20,\"done\":true}";
+            server.enqueue(new MockResponse().setBody(responseJson).setHeader("Content-Type", "application/json"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.setTestTemperature(0.7);
+            client.setTestMaxTokens(1000);
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final LlmChatResponse response = client.chat(request);
+
+            assertNotNull(response);
+            assertEquals("Hello! How can I help?", response.getContent());
+            assertEquals("stop", response.getFinishReason());
+            assertEquals("llama3:latest", response.getModel());
+            assertEquals(10, response.getPromptTokens());
+            assertEquals(20, response.getCompletionTokens());
+
+            final RecordedRequest recordedRequest = server.takeRequest();
+            assertEquals("/api/chat", recordedRequest.getPath());
+            assertEquals("POST", recordedRequest.getMethod());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_apiError() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            server.enqueue(new MockResponse().setResponseCode(500).setBody("Internal Server Error"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.setTestTemperature(0.7);
+            client.setTestMaxTokens(1000);
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            try {
+                client.chat(request);
+                fail("Expected LlmException");
+            } catch (final LlmException e) {
+                assertTrue(e.getMessage().contains("Ollama API error"));
+            }
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_success() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String streamResponse = "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n"
+                    + "{\"message\":{\"content\":\" world\"},\"done\":false}\n" + "{\"message\":{\"content\":\"!\"},\"done\":true}\n";
+            server.enqueue(new MockResponse().setBody(streamResponse).setHeader("Content-Type", "application/x-ndjson"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.setTestTemperature(0.7);
+            client.setTestMaxTokens(1000);
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final List<String> chunks = new ArrayList<>();
+            final List<Boolean> doneFlags = new ArrayList<>();
+
+            client.streamChat(request, new LlmStreamCallback() {
+                @Override
+                public void onChunk(final String content, final boolean done) {
+                    chunks.add(content);
+                    doneFlags.add(done);
+                }
+
+                @Override
+                public void onError(final Throwable e) {
+                    fail("Unexpected error: " + e.getMessage());
+                }
+            });
+
+            assertEquals(3, chunks.size());
+            assertEquals("Hello", chunks.get(0));
+            assertEquals(" world", chunks.get(1));
+            assertEquals("!", chunks.get(2));
+            assertFalse(doneFlags.get(0));
+            assertFalse(doneFlags.get(1));
+            assertTrue(doneFlags.get(2));
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_apiError() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            server.enqueue(new MockResponse().setResponseCode(503).setBody("Service Unavailable"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.setTestTemperature(0.7);
+            client.setTestMaxTokens(1000);
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final List<Throwable> errors = new ArrayList<>();
+
+            try {
+                client.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String content, final boolean done) {
+                        fail("Should not receive chunks on error");
+                    }
+
+                    @Override
+                    public void onError(final Throwable e) {
+                        errors.add(e);
+                    }
+                });
+                fail("Expected LlmException");
+            } catch (final LlmException e) {
+                assertTrue(e.getMessage().contains("Ollama API error"));
+            }
+
+            assertEquals(1, errors.size());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_success() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String tagsResponse = "{\"models\":[{\"name\":\"llama3:latest\"}]}";
+            server.enqueue(new MockResponse().setBody(tagsResponse).setHeader("Content-Type", "application/json"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.initHttpClient();
+
+            assertTrue(client.checkAvailabilityNow());
+
+            final RecordedRequest recordedRequest = server.takeRequest();
+            assertEquals("/api/tags", recordedRequest.getPath());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_blankApiUrl() {
+        client.setTestApiUrl("");
+        assertFalse(client.checkAvailabilityNow());
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_nullApiUrl() {
+        client.setTestApiUrl(null);
+        assertFalse(client.checkAvailabilityNow());
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_serverError() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            server.enqueue(new MockResponse().setResponseCode(500).setBody("Internal Server Error"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.initHttpClient();
+
+            assertFalse(client.checkAvailabilityNow());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_modelNotFound() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String tagsResponse = "{\"models\":[{\"name\":\"mistral:latest\"}]}";
+            server.enqueue(new MockResponse().setBody(tagsResponse).setHeader("Content-Type", "application/json"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.initHttpClient();
+
+            assertFalse(client.checkAvailabilityNow());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    // --- Testable subclass ---
+
+    static class TestableOllamaLlmClient extends OllamaLlmClient {
+
+        private String testApiUrl = "http://localhost:11434";
+        private String testModel = "llama3:latest";
+        private int testTimeout = 30000;
+        private double testTemperature = 0.7;
+        private int testMaxTokens = 1000;
+        private int testIntentDetectionMaxTokens = 500;
+        private int testEvaluationMaxTokens = 500;
+
+        void setTestApiUrl(final String apiUrl) {
+            this.testApiUrl = apiUrl;
+        }
+
+        void setTestModel(final String model) {
+            this.testModel = model;
+        }
+
+        void setTestTimeout(final int timeout) {
+            this.testTimeout = timeout;
+        }
+
+        void setTestTemperature(final double temperature) {
+            this.testTemperature = temperature;
+        }
+
+        void setTestMaxTokens(final int maxTokens) {
+            this.testMaxTokens = maxTokens;
+        }
+
+        @Override
+        protected String getApiUrl() {
+            return testApiUrl;
+        }
+
+        @Override
+        protected String getModel() {
+            return testModel;
+        }
+
+        @Override
+        protected int getTimeout() {
+            return testTimeout;
+        }
+
+        @Override
+        protected double getTemperature() {
+            return testTemperature;
+        }
+
+        @Override
+        protected int getMaxTokens() {
+            return testMaxTokens;
+        }
+
+        @Override
+        protected int getIntentDetectionMaxTokens() {
+            return testIntentDetectionMaxTokens;
+        }
+
+        @Override
+        protected int getEvaluationMaxTokens() {
+            return testEvaluationMaxTokens;
+        }
+
+        public CloseableHttpClient getTestHttpClient() {
+            return httpClient;
+        }
+
+        void initHttpClient() {
+            final int timeout = getTimeout();
+            final RequestConfig requestConfig = RequestConfig.custom()
+                    .setConnectionRequestTimeout(Timeout.ofMilliseconds(timeout))
+                    .setResponseTimeout(Timeout.ofMilliseconds(timeout))
+                    .build();
+            httpClient = HttpClients.custom()
+                    .setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
+                            .setDefaultConnectionConfig(
+                                    ConnectionConfig.custom().setConnectTimeout(Timeout.ofMilliseconds(timeout)).build())
+                            .build())
+                    .setDefaultRequestConfig(requestConfig)
+                    .disableAutomaticRetries()
+                    .build();
+        }
+    }
+}
