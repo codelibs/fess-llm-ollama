@@ -206,6 +206,68 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_buildRequestBody_withNumCtx() {
+        client.setTestModel("llama3:latest");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.setTemperature(0.7);
+        request.putExtraParam("num_ctx", "4096");
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> options = (Map<String, Object>) body.get("options");
+        assertNotNull(options);
+        assertEquals(4096, options.get("num_ctx"));
+    }
+
+    @Test
+    public void test_buildRequestBody_withTopPAndTopK() {
+        client.setTestModel("llama3:latest");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.putExtraParam("top_p", "0.9");
+        request.putExtraParam("top_k", "40");
+        request.putExtraParam("num_ctx", "8192");
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> options = (Map<String, Object>) body.get("options");
+        assertNotNull(options);
+        assertEquals(0.9, options.get("top_p"));
+        assertEquals(40, options.get("top_k"));
+        assertEquals(8192, options.get("num_ctx"));
+    }
+
+    @Test
+    public void test_parseOptionValue_integer() {
+        assertEquals(42, client.parseOptionValue("42"));
+        assertEquals(0, client.parseOptionValue("0"));
+        assertEquals(-1, client.parseOptionValue("-1"));
+    }
+
+    @Test
+    public void test_parseOptionValue_double() {
+        assertEquals(1.1, client.parseOptionValue("1.1"));
+        assertEquals(0.5, client.parseOptionValue("0.5"));
+    }
+
+    @Test
+    public void test_parseOptionValue_boolean() {
+        assertEquals(true, client.parseOptionValue("true"));
+        assertEquals(false, client.parseOptionValue("false"));
+        assertEquals(true, client.parseOptionValue("TRUE"));
+    }
+
+    @Test
+    public void test_parseOptionValue_string() {
+        assertEquals("hello", client.parseOptionValue("hello"));
+    }
+
+    @Test
     public void test_init_and_destroy() {
         final TestableOllamaLlmClient testClient = new TestableOllamaLlmClient();
         testClient.setTestApiUrl("http://localhost:11434");
