@@ -588,6 +588,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
     }
 
     @Override
+    protected int getEvaluationDescriptionMaxChars() {
+        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.evaluation.description.max.chars", "500"));
+    }
+
+    @Override
     protected String getSystemPrompt() {
         if (systemPrompt == null) {
             throw new LlmException("systemPrompt is not configured for " + getName());
