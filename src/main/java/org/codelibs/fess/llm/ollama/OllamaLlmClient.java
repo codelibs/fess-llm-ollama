@@ -182,7 +182,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 final int statusCode = response.getCode();
                 if (statusCode < 200 || statusCode >= 300) {
                     logger.warn("Ollama API error. url={}, statusCode={}, message={}", url, statusCode, response.getReasonPhrase());
-                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase());
+                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
+                            resolveErrorCode(statusCode));
                 }
 
                 final String responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
@@ -250,7 +251,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 if (statusCode < 200 || statusCode >= 300) {
                     logger.warn("Ollama streaming API error. url={}, statusCode={}, message={}", url, statusCode,
                             response.getReasonPhrase());
-                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase());
+                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
+                            resolveErrorCode(statusCode));
                 }
 
                 if (response.getEntity() == null) {
@@ -327,13 +329,19 @@ public class OllamaLlmClient extends AbstractLlmClient {
         final Map<String, Object> options = new HashMap<>();
         if (request.getTemperature() != null) {
             options.put("temperature", request.getTemperature());
-        } else {
-            options.put("temperature", getTemperature());
         }
         if (request.getMaxTokens() != null) {
             options.put("num_predict", request.getMaxTokens());
-        } else {
-            options.put("num_predict", getMaxTokens());
+        }
+        if (request.getExtraParams() != null) {
+            final String topP = request.getExtraParam("top_p");
+            if (topP != null) {
+                options.put("top_p", Double.parseDouble(topP));
+            }
+            final String topK = request.getExtraParam("top_k");
+            if (topK != null) {
+                options.put("top_k", Integer.parseInt(topK));
+            }
         }
         if (!options.isEmpty()) {
             body.put("options", options);
@@ -415,6 +423,19 @@ public class OllamaLlmClient extends AbstractLlmClient {
         this.directAnswerSystemPrompt = directAnswerSystemPrompt;
     }
 
+    private String resolveErrorCode(final int statusCode) {
+        if (statusCode == 429) {
+            return LlmException.ERROR_RATE_LIMIT;
+        }
+        if (statusCode == 401 || statusCode == 403) {
+            return LlmException.ERROR_AUTH;
+        }
+        if (statusCode == 502 || statusCode == 503) {
+            return LlmException.ERROR_SERVICE_UNAVAILABLE;
+        }
+        return LlmException.ERROR_UNKNOWN;
+    }
+
     /**
      * Gets the Ollama API URL.
      *
@@ -435,13 +456,24 @@ public class OllamaLlmClient extends AbstractLlmClient {
     }
 
     @Override
-    protected int getIntentDetectionMaxTokens() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.intent.max.tokens", "500"));
+    protected String getConfigPrefix() {
+        return "rag.llm.ollama";
     }
 
     @Override
-    protected int getEvaluationMaxTokens() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.evaluation.max.tokens", "500"));
+    protected void applyPromptTypeParams(final LlmChatRequest request, final String promptType) {
+        super.applyPromptTypeParams(request, promptType);
+        final String prefix = getConfigPrefix() + "." + promptType;
+        final var config = ComponentUtil.getFessConfig();
+
+        final String topP = config.getOrDefault(prefix + ".top.p", null);
+        if (topP != null) {
+            request.putExtraParam("top_p", topP);
+        }
+        final String topK = config.getOrDefault(prefix + ".top.k", null);
+        if (topK != null) {
+            request.putExtraParam("top_k", topK);
+        }
     }
 
     @Override
@@ -457,16 +489,6 @@ public class OllamaLlmClient extends AbstractLlmClient {
     @Override
     protected String getLlmType() {
         return ComponentUtil.getFessConfig().getSystemProperty("rag.llm.name", "ollama");
-    }
-
-    @Override
-    protected double getTemperature() {
-        return Double.parseDouble(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.temperature", "0.7"));
-    }
-
-    @Override
-    protected int getMaxTokens() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.max.tokens", "4096"));
     }
 
     @Override
