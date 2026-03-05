@@ -142,6 +142,8 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
         final LlmChatRequest request = new LlmChatRequest();
         request.addMessage(new LlmMessage("user", "Hello"));
+        request.setTemperature(0.7);
+        request.setMaxTokens(1000);
 
         final Map<String, Object> body = client.buildRequestBody(request, false);
         assertEquals("llama3:latest", body.get("model"));
@@ -452,8 +454,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         private int testTimeout = 30000;
         private double testTemperature = 0.7;
         private int testMaxTokens = 1000;
-        private int testIntentDetectionMaxTokens = 500;
-        private int testEvaluationMaxTokens = 500;
 
         void setTestApiUrl(final String apiUrl) {
             this.testApiUrl = apiUrl;
@@ -490,24 +490,12 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             return testTimeout;
         }
 
-        @Override
         protected double getTemperature() {
             return testTemperature;
         }
 
-        @Override
         protected int getMaxTokens() {
             return testMaxTokens;
-        }
-
-        @Override
-        protected int getIntentDetectionMaxTokens() {
-            return testIntentDetectionMaxTokens;
-        }
-
-        @Override
-        protected int getEvaluationMaxTokens() {
-            return testEvaluationMaxTokens;
         }
 
         public CloseableHttpClient getTestHttpClient() {

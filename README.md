@@ -3,7 +3,7 @@ Ollama LLM Plugin for Fess
 
 ## Overview
 
-This plugin provides Ollama integration for Fess's LLM (Large Language Model) features. It enables Fess to use locally hosted Ollama models for AI-powered search capabilities such as intent detection, answer generation, and document summarization.
+This plugin provides Ollama integration for Fess's RAG (Retrieval-Augmented Generation) features. It enables Fess to use locally hosted Ollama models for AI-powered search capabilities including intent detection, answer generation, document summarization, and FAQ handling.
 
 ## Download
 
@@ -29,11 +29,38 @@ Configure the following properties in `fess_config.properties`:
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `llm.api.url` | `http://localhost:11434` | Ollama API endpoint URL |
-| `llm.model` | - | Model name (e.g., `llama3:latest`) |
-| `llm.temperature` | `0.7` | Temperature for response generation |
-| `llm.max.tokens` | `1000` | Maximum tokens for response |
-| `llm.timeout` | `30000` | HTTP request timeout in milliseconds |
+| `rag.llm.name` | - | Set to `ollama` to use this plugin |
+| `rag.chat.enabled` | `false` | Enable RAG chat feature |
+| `rag.llm.ollama.api.url` | `http://localhost:11434` | Ollama API endpoint URL |
+| `rag.llm.ollama.model` | `gemma3:4b` | Model name (e.g., `llama3:latest`, `mistral`) |
+| `rag.llm.ollama.timeout` | `60000` | HTTP request timeout in milliseconds |
+| `rag.llm.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability |
+| `rag.llm.ollama.chat.context.max.chars` | `4000` | Maximum characters for context in chat |
+| `rag.llm.ollama.chat.evaluation.max.relevant.docs` | `3` | Maximum number of relevant documents for evaluation |
+
+### Per-Prompt-Type Parameters
+
+You can configure `top_p` and `top_k` sampling parameters for each prompt type:
+
+| Property | Description |
+|----------|-------------|
+| `rag.llm.ollama.<promptType>.top.p` | Top-p (nucleus) sampling parameter |
+| `rag.llm.ollama.<promptType>.top.k` | Top-k sampling parameter |
+
+## Features
+
+- **Intent Detection** - Determines user intent (search, summary, FAQ, unclear) and generates Lucene queries
+- **Answer Generation** - Generates answers based on search results with citation support
+- **Document Summarization** - Summarizes specific documents
+- **FAQ Handling** - Provides direct, concise answers to FAQ-type questions
+- **Relevance Evaluation** - Identifies the most relevant documents for answer generation
+- **Streaming Support** - Real-time response streaming via NDJSON format
+- **Availability Checking** - Validates Ollama server and model availability at configurable intervals
+
+## Ollama API Endpoints Used
+
+- `GET /api/tags` - Lists available models for availability checking
+- `POST /api/chat` - Performs chat completion (supports both standard and streaming modes)
 
 ## Development
 
