@@ -327,6 +327,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
         body.put("stream", stream);
 
         final Map<String, Object> options = new HashMap<>();
+
+        applyGlobalOptions(options);
+
         if (request.getTemperature() != null) {
             options.put("temperature", request.getTemperature());
         }
@@ -342,12 +345,61 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (topK != null) {
                 options.put("top_k", Integer.parseInt(topK));
             }
+            final String numCtx = request.getExtraParam("num_ctx");
+            if (numCtx != null) {
+                options.put("num_ctx", Integer.parseInt(numCtx));
+            }
         }
         if (!options.isEmpty()) {
             body.put("options", options);
         }
 
         return body;
+    }
+
+    /**
+     * Applies global options from {@code rag.llm.ollama.options.*} system properties to the options map.
+     *
+     * @param options the options map to populate
+     */
+    protected void applyGlobalOptions(final Map<String, Object> options) {
+        if (!ComponentUtil.hasComponent("systemProperties")) {
+            return;
+        }
+        final String optionsPrefix = getConfigPrefix() + ".options.";
+        final var systemProperties = ComponentUtil.getSystemProperties();
+        for (final String key : systemProperties.stringPropertyNames()) {
+            if (key.startsWith(optionsPrefix)) {
+                final String optionName = key.substring(optionsPrefix.length());
+                final String value = systemProperties.getProperty(key);
+                if (value != null && !value.isEmpty()) {
+                    options.put(optionName, parseOptionValue(value));
+                }
+            }
+        }
+    }
+
+    /**
+     * Parses a string value into an appropriate type (Integer, Double, Boolean, or String).
+     *
+     * @param value the string value to parse
+     * @return the parsed value
+     */
+    protected Object parseOptionValue(final String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (final NumberFormatException e) {
+            // not an integer
+        }
+        try {
+            return Double.parseDouble(value);
+        } catch (final NumberFormatException e) {
+            // not a double
+        }
+        if ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
+            return Boolean.parseBoolean(value);
+        }
+        return value;
     }
 
     /**
@@ -464,16 +516,50 @@ public class OllamaLlmClient extends AbstractLlmClient {
     protected void applyPromptTypeParams(final LlmChatRequest request, final String promptType) {
         super.applyPromptTypeParams(request, promptType);
         final String prefix = getConfigPrefix() + "." + promptType;
+        final String defaultPrefix = getConfigPrefix() + ".default";
         final var config = ComponentUtil.getFessConfig();
 
-        final String topP = config.getOrDefault(prefix + ".top.p", null);
+        final String topP = getConfigWithFallback(prefix + ".top.p", defaultPrefix + ".top.p");
         if (topP != null) {
             request.putExtraParam("top_p", topP);
         }
-        final String topK = config.getOrDefault(prefix + ".top.k", null);
+        final String topK = getConfigWithFallback(prefix + ".top.k", defaultPrefix + ".top.k");
         if (topK != null) {
             request.putExtraParam("top_k", topK);
         }
+        final String numCtx = getConfigWithFallback(prefix + ".num.ctx", defaultPrefix + ".num.ctx");
+        if (numCtx != null) {
+            request.putExtraParam("num_ctx", numCtx);
+        }
+
+        if (request.getTemperature() == null) {
+            final String defaultTemp = config.getOrDefault(defaultPrefix + ".temperature", null);
+            if (defaultTemp != null) {
+                request.setTemperature(Double.parseDouble(defaultTemp));
+            }
+        }
+        if (request.getMaxTokens() == null) {
+            final String defaultMaxTokens = config.getOrDefault(defaultPrefix + ".max.tokens", null);
+            if (defaultMaxTokens != null) {
+                request.setMaxTokens(Integer.parseInt(defaultMaxTokens));
+            }
+        }
+    }
+
+    /**
+     * Gets a config value with fallback. Returns the primary key's value if present, otherwise the fallback key's value.
+     *
+     * @param primaryKey the primary config key
+     * @param fallbackKey the fallback config key
+     * @return the config value, or null if neither key is set
+     */
+    protected String getConfigWithFallback(final String primaryKey, final String fallbackKey) {
+        final var config = ComponentUtil.getFessConfig();
+        final String value = config.getOrDefault(primaryKey, null);
+        if (value != null) {
+            return value;
+        }
+        return config.getOrDefault(fallbackKey, null);
     }
 
     @Override
