@@ -602,9 +602,16 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
             break;
         case "answer":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.5);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(2048);
+            }
+            break;
         case "summary":
             if (request.getTemperature() == null) {
-                request.setTemperature(0.7);
+                request.setTemperature(0.3);
             }
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(2048);
@@ -647,13 +654,26 @@ public class OllamaLlmClient extends AbstractLlmClient {
     }
 
     @Override
-    protected int getContextMaxChars() {
-        final int value = Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.context.max.chars", "4000"));
-        if (value <= 0) {
-            logger.warn("Invalid context max chars: {}. Using default: 4000", value);
-            return 4000;
+    protected int getContextMaxChars(final String promptType) {
+        final String key = "rag.llm.ollama." + promptType + ".context.max.chars";
+        final String configValue = ComponentUtil.getFessConfig().getOrDefault(key, null);
+        if (configValue != null) {
+            final int value = Integer.parseInt(configValue);
+            if (value > 0) {
+                return value;
+            }
+            logger.warn("Invalid context max chars for promptType={}: {}. Using default.", promptType, value);
         }
-        return value;
+        switch (promptType) {
+        case "answer":
+            return 10000;
+        case "summary":
+            return 10000;
+        case "faq":
+            return 6000;
+        default:
+            return 6000;
+        }
     }
 
     @Override

@@ -35,8 +35,18 @@ Configure the following properties in `fess_config.properties`:
 | `rag.llm.ollama.model` | `gemma3:4b` | Model name (e.g., `llama3:latest`, `mistral`) |
 | `rag.llm.ollama.timeout` | `60000` | HTTP request timeout in milliseconds |
 | `rag.llm.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability |
-| `rag.llm.ollama.chat.context.max.chars` | `4000` | Maximum characters for context in chat |
+| `rag.llm.ollama.answer.context.max.chars` | `10000` | Maximum characters for document context in answer generation |
+| `rag.llm.ollama.summary.context.max.chars` | `10000` | Maximum characters for document context in summary generation |
+| `rag.llm.ollama.faq.context.max.chars` | `6000` | Maximum characters for document context in FAQ generation |
 | `rag.llm.ollama.chat.evaluation.max.relevant.docs` | `3` | Maximum number of relevant documents for evaluation |
+
+### Recommended num_ctx Setting
+
+For `gemma3:4b` with 16GB GPU, set:
+
+```properties
+rag.llm.ollama.default.num.ctx=8192
+```
 
 ### Per-Prompt-Type Parameters
 
