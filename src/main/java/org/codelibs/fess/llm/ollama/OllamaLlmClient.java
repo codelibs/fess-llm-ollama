@@ -130,6 +130,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
     protected boolean isModelAvailable(final String responseBody) {
         final String configuredModel = getModel();
         if (StringUtil.isBlank(configuredModel)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[LLM:OLLAMA] Model name is not configured, skipping model availability check");
+            }
             return true;
         }
 
@@ -140,7 +143,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 for (final JsonNode model : models) {
                     if (model.has("name")) {
                         final String modelName = model.get("name").asText();
-                        if (configuredModel.equals(modelName)) {
+                        if (normalizeModelName(configuredModel).equals(normalizeModelName(modelName))) {
                             if (logger.isDebugEnabled()) {
                                 logger.debug("[LLM:OLLAMA] Model found. configured={}, found={}", configuredModel, modelName);
                             }
@@ -152,10 +155,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
             logger.warn("Configured model not found in Ollama. model={}", configuredModel);
             return false;
         } catch (final Exception e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[LLM:OLLAMA] Failed to parse Ollama models response. error={}", e.getMessage());
-            }
-            return true;
+            logger.warn("[LLM:OLLAMA] Failed to parse Ollama models response. error={}", e.getMessage());
+            return false;
         }
     }
 
@@ -223,7 +224,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
             throw e;
         } catch (final Exception e) {
             logger.warn("Failed to call Ollama API. url={}, error={}", url, e.getMessage(), e);
-            throw new LlmException("Failed to call Ollama API", e);
+            throw new LlmException("Failed to call Ollama API", LlmException.ERROR_CONNECTION, e);
         }
     }
 
@@ -299,7 +300,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
             throw e;
         } catch (final IOException e) {
             logger.warn("Failed to stream from Ollama API. url={}, error={}", url, e.getMessage(), e);
-            final LlmException llmException = new LlmException("Failed to stream from Ollama API", e);
+            final LlmException llmException = new LlmException("Failed to stream from Ollama API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
         }
@@ -339,15 +340,27 @@ public class OllamaLlmClient extends AbstractLlmClient {
         if (request.getExtraParams() != null) {
             final String topP = request.getExtraParam("top_p");
             if (topP != null) {
-                options.put("top_p", Double.parseDouble(topP));
+                try {
+                    options.put("top_p", Double.parseDouble(topP));
+                } catch (final NumberFormatException e) {
+                    logger.warn("[LLM:OLLAMA] Invalid top_p value, skipping. value={}", topP);
+                }
             }
             final String topK = request.getExtraParam("top_k");
             if (topK != null) {
-                options.put("top_k", Integer.parseInt(topK));
+                try {
+                    options.put("top_k", Integer.parseInt(topK));
+                } catch (final NumberFormatException e) {
+                    logger.warn("[LLM:OLLAMA] Invalid top_k value, skipping. value={}", topK);
+                }
             }
             final String numCtx = request.getExtraParam("num_ctx");
             if (numCtx != null) {
-                options.put("num_ctx", Integer.parseInt(numCtx));
+                try {
+                    options.put("num_ctx", Integer.parseInt(numCtx));
+                } catch (final NumberFormatException e) {
+                    logger.warn("[LLM:OLLAMA] Invalid num_ctx value, skipping. value={}", numCtx);
+                }
             }
         }
         if (!options.isEmpty()) {
@@ -475,17 +488,14 @@ public class OllamaLlmClient extends AbstractLlmClient {
         this.directAnswerSystemPrompt = directAnswerSystemPrompt;
     }
 
-    private String resolveErrorCode(final int statusCode) {
-        if (statusCode == 429) {
-            return LlmException.ERROR_RATE_LIMIT;
-        }
-        if (statusCode == 401 || statusCode == 403) {
-            return LlmException.ERROR_AUTH;
-        }
-        if (statusCode == 502 || statusCode == 503) {
-            return LlmException.ERROR_SERVICE_UNAVAILABLE;
-        }
-        return LlmException.ERROR_UNKNOWN;
+    /**
+     * Normalizes a model name by stripping the {@code :latest} suffix.
+     *
+     * @param name the model name
+     * @return the normalized model name
+     */
+    private String normalizeModelName(final String name) {
+        return name.endsWith(":latest") ? name.substring(0, name.length() - 7) : name;
     }
 
     /**
@@ -544,6 +554,65 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 request.setMaxTokens(Integer.parseInt(defaultMaxTokens));
             }
         }
+        applyDefaultParams(request, promptType);
+    }
+
+    /**
+     * Applies default generation parameters based on prompt type.
+     * Only sets defaults when user has not configured the parameter.
+     *
+     * @param request the LLM chat request
+     * @param promptType the prompt type (e.g. "intent", "evaluation", "answer")
+     */
+    protected void applyDefaultParams(final LlmChatRequest request, final String promptType) {
+        switch (promptType) {
+        case "intent":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.1);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(256);
+            }
+            break;
+        case "evaluation":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.1);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(512);
+            }
+            break;
+        case "unclear":
+        case "noresults":
+        case "docnotfound":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.7);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(512);
+            }
+            break;
+        case "direct":
+        case "faq":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.7);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(1024);
+            }
+            break;
+        case "answer":
+        case "summary":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.7);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(2048);
+            }
+            break;
+        default:
+            break;
+        }
     }
 
     /**
@@ -579,17 +648,34 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     @Override
     protected int getContextMaxChars() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.context.max.chars", "4000"));
+        final int value = Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.context.max.chars", "4000"));
+        if (value <= 0) {
+            logger.warn("Invalid context max chars: {}. Using default: 4000", value);
+            return 4000;
+        }
+        return value;
     }
 
     @Override
     protected int getEvaluationMaxRelevantDocs() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.evaluation.max.relevant.docs", "3"));
+        final int value =
+                Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.evaluation.max.relevant.docs", "3"));
+        if (value <= 0) {
+            logger.warn("Invalid evaluation max relevant docs: {}. Using default: 3", value);
+            return 3;
+        }
+        return value;
     }
 
     @Override
     protected int getEvaluationDescriptionMaxChars() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.evaluation.description.max.chars", "500"));
+        final int value =
+                Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.evaluation.description.max.chars", "500"));
+        if (value <= 0) {
+            logger.warn("Invalid evaluation description max chars: {}. Using default: 500", value);
+            return 500;
+        }
+        return value;
     }
 
     @Override

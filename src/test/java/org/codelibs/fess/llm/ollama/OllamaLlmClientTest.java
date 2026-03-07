@@ -107,7 +107,7 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     public void test_isModelAvailable_withInvalidJson() {
         client.setTestModel("llama3:latest");
         final String responseBody = "invalid json";
-        assertTrue(client.isModelAvailable(responseBody));
+        assertFalse(client.isModelAvailable(responseBody));
     }
 
     @Test
