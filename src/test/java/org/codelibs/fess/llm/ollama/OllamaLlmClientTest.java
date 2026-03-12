@@ -507,6 +507,305 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         }
     }
 
+    // --- Thinking (reasoning model) tests ---
+
+    @Test
+    public void test_buildRequestBody_thinkingBudgetZero() {
+        client.setTestModel("qwen3.5:35b");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.setThinkingBudget(0);
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        assertEquals(Boolean.FALSE, body.get("think"));
+    }
+
+    @Test
+    public void test_buildRequestBody_thinkingBudgetPositive() {
+        client.setTestModel("qwen3.5:35b");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.setThinkingBudget(1024);
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        assertEquals(Boolean.TRUE, body.get("think"));
+    }
+
+    @Test
+    public void test_buildRequestBody_thinkingBudgetNull() {
+        client.setTestModel("qwen3.5:35b");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        assertFalse(body.containsKey("think"));
+    }
+
+    @Test
+    public void test_chat_withThinkingResponse() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String responseJson = "{\"message\":{\"content\":\"The answer is 42.\","
+                    + "\"thinking\":\"Let me think about this carefully...\"},\"done_reason\":\"stop\","
+                    + "\"model\":\"qwen3.5:35b\",\"prompt_eval_count\":15,\"eval_count\":30,\"done\":true}";
+            server.enqueue(new MockResponse().setBody(responseJson).setHeader("Content-Type", "application/json"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("qwen3.5:35b");
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "What is the meaning of life?"));
+
+            final LlmChatResponse response = client.chat(request);
+
+            assertNotNull(response);
+            assertEquals("The answer is 42.", response.getContent());
+            assertEquals("stop", response.getFinishReason());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_withThinkingChunks() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String streamResponse = "{\"message\":{\"content\":\"\",\"thinking\":\"Let me think...\"},\"done\":false}\n"
+                    + "{\"message\":{\"content\":\"\",\"thinking\":\"Still thinking...\"},\"done\":false}\n"
+                    + "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n" + "{\"message\":{\"content\":\" world\"},\"done\":false}\n"
+                    + "{\"message\":{\"content\":\"!\"},\"done\":true}\n";
+            server.enqueue(new MockResponse().setBody(streamResponse).setHeader("Content-Type", "application/x-ndjson"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("qwen3.5:35b");
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final List<String> chunks = new ArrayList<>();
+            final List<Boolean> doneFlags = new ArrayList<>();
+
+            client.streamChat(request, new LlmStreamCallback() {
+                @Override
+                public void onChunk(final String content, final boolean done) {
+                    chunks.add(content);
+                    doneFlags.add(done);
+                }
+
+                @Override
+                public void onError(final Throwable e) {
+                    fail("Unexpected error: " + e.getMessage());
+                }
+            });
+
+            assertEquals(3, chunks.size());
+            assertEquals("Hello", chunks.get(0));
+            assertEquals(" world", chunks.get(1));
+            assertEquals("!", chunks.get(2));
+            assertFalse(doneFlags.get(0));
+            assertFalse(doneFlags.get(1));
+            assertTrue(doneFlags.get(2));
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_thinkingDisabled() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String streamResponse = "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n"
+                    + "{\"message\":{\"content\":\" world\"},\"done\":false}\n" + "{\"message\":{\"content\":\"!\"},\"done\":true}\n";
+            server.enqueue(new MockResponse().setBody(streamResponse).setHeader("Content-Type", "application/x-ndjson"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("qwen3.5:35b");
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+            request.setThinkingBudget(0);
+
+            final List<String> chunks = new ArrayList<>();
+
+            client.streamChat(request, new LlmStreamCallback() {
+                @Override
+                public void onChunk(final String content, final boolean done) {
+                    chunks.add(content);
+                }
+
+                @Override
+                public void onError(final Throwable e) {
+                    fail("Unexpected error: " + e.getMessage());
+                }
+            });
+
+            assertEquals(3, chunks.size());
+            assertEquals("Hello", chunks.get(0));
+            assertEquals(" world", chunks.get(1));
+            assertEquals("!", chunks.get(2));
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    // --- applyDefaultParams thinking tests ---
+
+    @Test
+    public void test_applyDefaultParams_intent_noThinkingDefault() {
+        final LlmChatRequest request = new LlmChatRequest();
+        assertNull(request.getThinkingBudget());
+
+        client.applyDefaultParams(request, "intent");
+
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_evaluation_noThinkingDefault() {
+        final LlmChatRequest request = new LlmChatRequest();
+        assertNull(request.getThinkingBudget());
+
+        client.applyDefaultParams(request, "evaluation");
+
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_answer_noThinkingDefault() {
+        final LlmChatRequest request = new LlmChatRequest();
+        assertNull(request.getThinkingBudget());
+
+        client.applyDefaultParams(request, "answer");
+
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_summary_noThinkingDefault() {
+        final LlmChatRequest request = new LlmChatRequest();
+        assertNull(request.getThinkingBudget());
+
+        client.applyDefaultParams(request, "summary");
+
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_direct_noThinkingDefault() {
+        final LlmChatRequest request = new LlmChatRequest();
+        assertNull(request.getThinkingBudget());
+
+        client.applyDefaultParams(request, "direct");
+
+        assertNull(request.getThinkingBudget());
+    }
+
+    // --- gemma3 compatibility tests (non-reasoning model) ---
+
+    @Test
+    public void test_chat_gemma3_noThinkingField() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String responseJson = "{\"message\":{\"content\":\"Hello! How can I help?\"},\"done_reason\":\"stop\","
+                    + "\"model\":\"gemma3:4b\",\"prompt_eval_count\":10,\"eval_count\":20,\"done\":true}";
+            server.enqueue(new MockResponse().setBody(responseJson).setHeader("Content-Type", "application/json"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("gemma3:4b");
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final LlmChatResponse response = client.chat(request);
+
+            assertNotNull(response);
+            assertEquals("Hello! How can I help?", response.getContent());
+            assertEquals("stop", response.getFinishReason());
+            assertEquals("gemma3:4b", response.getModel());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_gemma3_noThinkingField() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String streamResponse = "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n"
+                    + "{\"message\":{\"content\":\" from\"},\"done\":false}\n" + "{\"message\":{\"content\":\" gemma3\"},\"done\":false}\n"
+                    + "{\"message\":{\"content\":\"!\"},\"done\":true}\n";
+            server.enqueue(new MockResponse().setBody(streamResponse).setHeader("Content-Type", "application/x-ndjson"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("gemma3:4b");
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final List<String> chunks = new ArrayList<>();
+            final List<Boolean> doneFlags = new ArrayList<>();
+
+            client.streamChat(request, new LlmStreamCallback() {
+                @Override
+                public void onChunk(final String content, final boolean done) {
+                    chunks.add(content);
+                    doneFlags.add(done);
+                }
+
+                @Override
+                public void onError(final Throwable e) {
+                    fail("Unexpected error: " + e.getMessage());
+                }
+            });
+
+            assertEquals(4, chunks.size());
+            assertEquals("Hello", chunks.get(0));
+            assertEquals(" from", chunks.get(1));
+            assertEquals(" gemma3", chunks.get(2));
+            assertEquals("!", chunks.get(3));
+            assertFalse(doneFlags.get(0));
+            assertFalse(doneFlags.get(1));
+            assertFalse(doneFlags.get(2));
+            assertTrue(doneFlags.get(3));
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_buildRequestBody_gemma3_thinkingBudgetZero() {
+        client.setTestModel("gemma3:4b");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.setTemperature(0.7);
+        request.setMaxTokens(1000);
+        request.setThinkingBudget(0);
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        assertEquals("gemma3:4b", body.get("model"));
+        assertEquals(Boolean.FALSE, body.get("think"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> options = (Map<String, Object>) body.get("options");
+        assertNotNull(options);
+        assertEquals(0.7, options.get("temperature"));
+        assertEquals(1000, options.get("num_predict"));
+    }
+
     // --- Testable subclass ---
 
     static class TestableOllamaLlmClient extends OllamaLlmClient {

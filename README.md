@@ -57,6 +57,40 @@ You can configure `top_p` and `top_k` sampling parameters for each prompt type:
 | `rag.llm.ollama.<promptType>.top.p` | Top-p (nucleus) sampling parameter |
 | `rag.llm.ollama.<promptType>.top.k` | Top-k sampling parameter |
 
+### Reasoning Model Configuration (e.g., qwen3.5)
+
+Reasoning models like `qwen3.5` use internal thinking tokens that improve answer quality
+but consume output tokens. Configure thinking per prompt type for optimal results.
+
+```properties
+rag.llm.ollama.model=qwen3.5:35b
+rag.llm.ollama.timeout=120000
+
+# Structured output / short responses - disable thinking
+rag.llm.ollama.intent.thinking.budget=0
+rag.llm.ollama.evaluation.thinking.budget=0
+rag.llm.ollama.unclear.thinking.budget=0
+rag.llm.ollama.noresults.thinking.budget=0
+rag.llm.ollama.docnotfound.thinking.budget=0
+
+# Answer generation - enable thinking with increased token limit
+rag.llm.ollama.answer.thinking.budget=1
+rag.llm.ollama.answer.max.tokens=16384
+rag.llm.ollama.summary.thinking.budget=1
+rag.llm.ollama.summary.max.tokens=16384
+rag.llm.ollama.direct.thinking.budget=1
+rag.llm.ollama.direct.max.tokens=8192
+rag.llm.ollama.faq.thinking.budget=1
+rag.llm.ollama.faq.max.tokens=8192
+```
+
+The `thinking.budget` parameter controls the Ollama `think` flag:
+- `0` — disable thinking (`think: false`)
+- Any positive value — enable thinking (`think: true`)
+- Not set — use model default (reasoning models default to thinking enabled)
+
+When thinking is enabled, increase `max.tokens` to accommodate both thinking and content tokens.
+
 ## Features
 
 - **Intent Detection** - Determines user intent (search, summary, FAQ, unclear) and generates Lucene queries
