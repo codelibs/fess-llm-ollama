@@ -210,6 +210,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     chatResponse.setCompletionTokens(jsonNode.get("eval_count").asInt());
                 }
 
+                if (logger.isDebugEnabled() && jsonNode.has("message") && jsonNode.get("message").has("thinking")) {
+                    final String thinking = jsonNode.get("message").get("thinking").asText();
+                    logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinking.length());
+                }
+
                 if (logger.isDebugEnabled()) {
                     logger.debug(
                             "Received chat response from Ollama. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
@@ -275,6 +280,10 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
                             if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
                                 final String content = jsonNode.get("message").get("content").asText();
+                                if (content.isEmpty() && !done && jsonNode.get("message").has("thinking")) {
+                                    // Skip thinking-only chunk
+                                    continue;
+                                }
                                 callback.onChunk(content, done);
                                 chunkCount++;
                             } else if (done) {
@@ -365,6 +374,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
         }
         if (!options.isEmpty()) {
             body.put("options", options);
+        }
+
+        final Integer thinkingBudget = request.getThinkingBudget();
+        if (thinkingBudget != null) {
+            body.put("think", thinkingBudget > 0);
         }
 
         return body;
