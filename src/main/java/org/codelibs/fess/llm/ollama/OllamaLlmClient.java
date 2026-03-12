@@ -215,20 +215,17 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinking.length());
                 }
 
-                if (logger.isDebugEnabled()) {
-                    logger.debug(
-                            "Received chat response from Ollama. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
-                            chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
-                            chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
-                            System.currentTimeMillis() - startTime);
-                }
+                logger.info(
+                        "[LLM:OLLAMA] Chat response received. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
+                        chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
+                        chatResponse.getContent() != null ? chatResponse.getContent().length() : 0, System.currentTimeMillis() - startTime);
 
                 return chatResponse;
             }
         } catch (final LlmException e) {
             throw e;
         } catch (final Exception e) {
-            logger.warn("Failed to call Ollama API. url={}, error={}", url, e.getMessage(), e);
+            logger.warn("[LLM:OLLAMA] Failed to call Ollama API. url={}, error={}", url, e.getMessage(), e);
             throw new LlmException("Failed to call Ollama API", LlmException.ERROR_CONNECTION, e);
         }
     }
@@ -262,7 +259,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 }
 
                 if (response.getEntity() == null) {
-                    logger.warn("Empty response from Ollama streaming API. url={}", url);
+                    logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
                     throw new LlmException("Empty response from Ollama");
                 }
 
@@ -299,16 +296,14 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     }
                 }
 
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:OLLAMA] Completed streaming chat from Ollama. url={}, chunkCount={}, elapsedTime={}ms", url,
-                            chunkCount, System.currentTimeMillis() - startTime);
-                }
+                logger.info("[LLM:OLLAMA] Stream completed. chunkCount={}, elapsedTime={}ms", chunkCount,
+                        System.currentTimeMillis() - startTime);
             }
         } catch (final LlmException e) {
             callback.onError(e);
             throw e;
         } catch (final IOException e) {
-            logger.warn("Failed to stream from Ollama API. url={}, error={}", url, e.getMessage(), e);
+            logger.warn("[LLM:OLLAMA] Failed to stream from Ollama API. url={}, error={}", url, e.getMessage(), e);
             final LlmException llmException = new LlmException("Failed to stream from Ollama API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
