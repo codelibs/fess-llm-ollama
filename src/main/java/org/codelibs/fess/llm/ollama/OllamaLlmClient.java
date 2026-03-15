@@ -152,7 +152,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     }
                 }
             }
-            logger.warn("Configured model not found in Ollama. model={}", configuredModel);
+            logger.warn("[LLM:OLLAMA] Configured model not found. model={}", configuredModel);
             return false;
         } catch (final Exception e) {
             logger.warn("[LLM:OLLAMA] Failed to parse Ollama models response. error={}", e.getMessage());
@@ -182,7 +182,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
             try (var response = getHttpClient().execute(httpRequest)) {
                 final int statusCode = response.getCode();
                 if (statusCode < 200 || statusCode >= 300) {
-                    logger.warn("Ollama API error. url={}, statusCode={}, message={}", url, statusCode, response.getReasonPhrase());
+                    logger.warn("[LLM:OLLAMA] API error. url={}, statusCode={}, message={}", url, statusCode, response.getReasonPhrase());
                     throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
                             resolveErrorCode(statusCode));
                 }
@@ -252,7 +252,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
             try (var response = getHttpClient().execute(httpRequest)) {
                 final int statusCode = response.getCode();
                 if (statusCode < 200 || statusCode >= 300) {
-                    logger.warn("Ollama streaming API error. url={}, statusCode={}, message={}", url, statusCode,
+                    logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}", url, statusCode,
                             response.getReasonPhrase());
                     throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
                             resolveErrorCode(statusCode));
@@ -264,6 +264,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 }
 
                 int chunkCount = 0;
+                long firstChunkTime = 0;
                 try (BufferedReader reader =
                         new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
                     String line;
@@ -282,6 +283,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
                                     continue;
                                 }
                                 callback.onChunk(content, done);
+                                if (chunkCount == 0) {
+                                    firstChunkTime = System.currentTimeMillis() - startTime;
+                                }
                                 chunkCount++;
                             } else if (done) {
                                 callback.onChunk("", true);
@@ -291,12 +295,12 @@ public class OllamaLlmClient extends AbstractLlmClient {
                                 break;
                             }
                         } catch (final JsonProcessingException e) {
-                            logger.warn("Failed to parse Ollama streaming response. line={}", line, e);
+                            logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
                         }
                     }
                 }
 
-                logger.info("[LLM:OLLAMA] Stream completed. chunkCount={}, elapsedTime={}ms", chunkCount,
+                logger.info("[LLM:OLLAMA] Stream completed. chunkCount={}, firstChunkMs={}, elapsedTime={}ms", chunkCount, firstChunkTime,
                         System.currentTimeMillis() - startTime);
             }
         } catch (final LlmException e) {
