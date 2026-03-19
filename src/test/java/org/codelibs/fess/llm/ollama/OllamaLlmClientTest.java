@@ -806,6 +806,21 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         assertEquals(1000, options.get("num_predict"));
     }
 
+    @Test
+    public void test_getHistoryMaxChars_default() {
+        assertEquals(4000, client.testGetHistoryMaxChars());
+    }
+
+    @Test
+    public void test_getIntentHistoryMaxMessages_default() {
+        assertEquals(6, client.testGetIntentHistoryMaxMessages());
+    }
+
+    @Test
+    public void test_getHistoryAssistantMaxChars_default() {
+        assertEquals(500, client.testGetHistoryAssistantMaxChars());
+    }
+
     // --- Testable subclass ---
 
     static class TestableOllamaLlmClient extends OllamaLlmClient {
@@ -857,6 +872,43 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
         protected int getMaxTokens() {
             return testMaxTokens;
+        }
+
+        @Override
+        protected int getHistoryMaxChars() {
+            return 4000;
+        }
+
+        @Override
+        protected int getIntentHistoryMaxMessages() {
+            return 6;
+        }
+
+        @Override
+        protected int getIntentHistoryMaxChars() {
+            return 3000;
+        }
+
+        @Override
+        public int getHistoryAssistantMaxChars() {
+            return 500;
+        }
+
+        @Override
+        public int getHistoryAssistantSummaryMaxChars() {
+            return 500;
+        }
+
+        int testGetHistoryMaxChars() {
+            return getHistoryMaxChars();
+        }
+
+        int testGetIntentHistoryMaxMessages() {
+            return getIntentHistoryMaxMessages();
+        }
+
+        int testGetHistoryAssistantMaxChars() {
+            return getHistoryAssistantMaxChars();
         }
 
         public CloseableHttpClient getTestHttpClient() {
