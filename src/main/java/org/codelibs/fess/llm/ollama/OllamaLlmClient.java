@@ -77,6 +77,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
     protected String faqAnswerSystemPrompt;
     /** The system prompt for direct answer generation. */
     protected String directAnswerSystemPrompt;
+    /** The prompt for query regeneration. */
+    protected String queryRegenerationPrompt;
 
     /**
      * Default constructor.
@@ -501,6 +503,12 @@ public class OllamaLlmClient extends AbstractLlmClient {
         this.directAnswerSystemPrompt = directAnswerSystemPrompt;
     }
 
+    /** Sets the prompt for query regeneration.
+     * @param queryRegenerationPrompt the query regeneration prompt */
+    public void setQueryRegenerationPrompt(final String queryRegenerationPrompt) {
+        this.queryRegenerationPrompt = queryRegenerationPrompt;
+    }
+
     /**
      * Normalizes a model name by stripping the {@code :latest} suffix.
      *
@@ -628,6 +636,14 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(2048);
+            }
+            break;
+        case "queryregeneration":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.3);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(256);
             }
             break;
         default:
@@ -789,5 +805,13 @@ public class OllamaLlmClient extends AbstractLlmClient {
             throw new LlmException("directAnswerSystemPrompt is not configured for " + getName());
         }
         return directAnswerSystemPrompt;
+    }
+
+    @Override
+    protected String getQueryRegenerationPrompt() {
+        if (queryRegenerationPrompt == null) {
+            throw new LlmException("queryRegenerationPrompt is not configured for " + getName());
+        }
+        return queryRegenerationPrompt;
     }
 }
