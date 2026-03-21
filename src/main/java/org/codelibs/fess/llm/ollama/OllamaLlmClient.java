@@ -57,29 +57,6 @@ public class OllamaLlmClient extends AbstractLlmClient {
     /** The name identifier for the Ollama LLM client. */
     protected static final String NAME = "ollama";
 
-    /** The system prompt for LLM interactions. */
-    protected String systemPrompt;
-    /** The prompt for detecting user intent. */
-    protected String intentDetectionPrompt;
-    /** The system prompt for handling unclear intents. */
-    protected String unclearIntentSystemPrompt;
-    /** The system prompt for handling no results. */
-    protected String noResultsSystemPrompt;
-    /** The system prompt for handling document not found. */
-    protected String documentNotFoundSystemPrompt;
-    /** The prompt for evaluating responses. */
-    protected String evaluationPrompt;
-    /** The system prompt for answer generation. */
-    protected String answerGenerationSystemPrompt;
-    /** The system prompt for summary generation. */
-    protected String summarySystemPrompt;
-    /** The system prompt for FAQ answer generation. */
-    protected String faqAnswerSystemPrompt;
-    /** The system prompt for direct answer generation. */
-    protected String directAnswerSystemPrompt;
-    /** The prompt for query regeneration. */
-    protected String queryRegenerationPrompt;
-
     /**
      * Default constructor.
      */
@@ -443,72 +420,6 @@ public class OllamaLlmClient extends AbstractLlmClient {
         return map;
     }
 
-    /** Sets the system prompt for LLM interactions.
-     * @param systemPrompt the system prompt */
-    public void setSystemPrompt(final String systemPrompt) {
-        this.systemPrompt = systemPrompt;
-    }
-
-    /** Sets the prompt for detecting user intent.
-     * @param intentDetectionPrompt the intent detection prompt */
-    public void setIntentDetectionPrompt(final String intentDetectionPrompt) {
-        this.intentDetectionPrompt = intentDetectionPrompt;
-    }
-
-    /** Sets the system prompt for handling unclear intents.
-     * @param unclearIntentSystemPrompt the unclear intent system prompt */
-    public void setUnclearIntentSystemPrompt(final String unclearIntentSystemPrompt) {
-        this.unclearIntentSystemPrompt = unclearIntentSystemPrompt;
-    }
-
-    /** Sets the system prompt for handling no results.
-     * @param noResultsSystemPrompt the no results system prompt */
-    public void setNoResultsSystemPrompt(final String noResultsSystemPrompt) {
-        this.noResultsSystemPrompt = noResultsSystemPrompt;
-    }
-
-    /** Sets the system prompt for handling document not found.
-     * @param documentNotFoundSystemPrompt the document not found system prompt */
-    public void setDocumentNotFoundSystemPrompt(final String documentNotFoundSystemPrompt) {
-        this.documentNotFoundSystemPrompt = documentNotFoundSystemPrompt;
-    }
-
-    /** Sets the prompt for evaluating responses.
-     * @param evaluationPrompt the evaluation prompt */
-    public void setEvaluationPrompt(final String evaluationPrompt) {
-        this.evaluationPrompt = evaluationPrompt;
-    }
-
-    /** Sets the system prompt for answer generation.
-     * @param answerGenerationSystemPrompt the answer generation system prompt */
-    public void setAnswerGenerationSystemPrompt(final String answerGenerationSystemPrompt) {
-        this.answerGenerationSystemPrompt = answerGenerationSystemPrompt;
-    }
-
-    /** Sets the system prompt for summary generation.
-     * @param summarySystemPrompt the summary system prompt */
-    public void setSummarySystemPrompt(final String summarySystemPrompt) {
-        this.summarySystemPrompt = summarySystemPrompt;
-    }
-
-    /** Sets the system prompt for FAQ answer generation.
-     * @param faqAnswerSystemPrompt the FAQ answer system prompt */
-    public void setFaqAnswerSystemPrompt(final String faqAnswerSystemPrompt) {
-        this.faqAnswerSystemPrompt = faqAnswerSystemPrompt;
-    }
-
-    /** Sets the system prompt for direct answer generation.
-     * @param directAnswerSystemPrompt the direct answer system prompt */
-    public void setDirectAnswerSystemPrompt(final String directAnswerSystemPrompt) {
-        this.directAnswerSystemPrompt = directAnswerSystemPrompt;
-    }
-
-    /** Sets the prompt for query regeneration.
-     * @param queryRegenerationPrompt the query regeneration prompt */
-    public void setQueryRegenerationPrompt(final String queryRegenerationPrompt) {
-        this.queryRegenerationPrompt = queryRegenerationPrompt;
-    }
-
     /**
      * Normalizes a model name by stripping the {@code :latest} suffix.
      *
@@ -535,7 +446,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     @Override
     protected int getTimeout() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.timeout", "60000"));
+        return getConfigInt("timeout", 60000);
     }
 
     @Override
@@ -669,7 +580,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     @Override
     protected int getAvailabilityCheckInterval() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.availability.check.interval", "60"));
+        return getConfigInt("availability.check.interval", 60);
     }
 
     @Override
@@ -707,176 +618,37 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     @Override
     protected int getEvaluationMaxRelevantDocs() {
-        final int value =
-                Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.evaluation.max.relevant.docs", "3"));
-        if (value <= 0) {
-            logger.warn("Invalid evaluation max relevant docs: {}. Using default: 3", value);
-            return 3;
-        }
-        return value;
+        return getConfigInt("chat.evaluation.max.relevant.docs", 3);
     }
 
     @Override
     protected int getEvaluationDescriptionMaxChars() {
-        final int value =
-                Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.chat.evaluation.description.max.chars", "500"));
-        if (value <= 0) {
-            logger.warn("Invalid evaluation description max chars: {}. Using default: 500", value);
-            return 500;
-        }
-        return value;
+        return getConfigInt("chat.evaluation.description.max.chars", 500);
     }
 
     @Override
     protected int getHistoryMaxChars() {
-        final String key = "rag.llm.ollama.history.max.chars";
-        final String configValue = ComponentUtil.getFessConfig().getOrDefault(key, null);
-        if (configValue != null) {
-            final int value = Integer.parseInt(configValue);
-            if (value > 0) {
-                return value;
-            }
-        }
-        return 4000;
+        return getConfigInt("history.max.chars", 4000);
     }
 
     @Override
     protected int getIntentHistoryMaxMessages() {
-        final String key = "rag.llm.ollama.intent.history.max.messages";
-        final String configValue = ComponentUtil.getFessConfig().getOrDefault(key, null);
-        if (configValue != null) {
-            final int value = Integer.parseInt(configValue);
-            if (value > 0) {
-                return value;
-            }
-        }
-        return 6;
+        return getConfigInt("intent.history.max.messages", 6);
     }
 
     @Override
     protected int getIntentHistoryMaxChars() {
-        final String key = "rag.llm.ollama.intent.history.max.chars";
-        final String configValue = ComponentUtil.getFessConfig().getOrDefault(key, null);
-        if (configValue != null) {
-            final int value = Integer.parseInt(configValue);
-            if (value > 0) {
-                return value;
-            }
-        }
-        return 3000;
+        return getConfigInt("intent.history.max.chars", 3000);
     }
 
     @Override
     public int getHistoryAssistantMaxChars() {
-        final String key = "rag.llm.ollama.history.assistant.max.chars";
-        final String configValue = ComponentUtil.getFessConfig().getOrDefault(key, null);
-        if (configValue != null) {
-            final int value = Integer.parseInt(configValue);
-            if (value > 0) {
-                return value;
-            }
-        }
-        return 500;
+        return getConfigInt("history.assistant.max.chars", 500);
     }
 
     @Override
     public int getHistoryAssistantSummaryMaxChars() {
-        final String key = "rag.llm.ollama.history.assistant.summary.max.chars";
-        final String configValue = ComponentUtil.getFessConfig().getOrDefault(key, null);
-        if (configValue != null) {
-            final int value = Integer.parseInt(configValue);
-            if (value > 0) {
-                return value;
-            }
-        }
-        return 500;
+        return getConfigInt("history.assistant.summary.max.chars", 500);
     }
 
-    @Override
-    protected String getSystemPrompt() {
-        if (systemPrompt == null) {
-            throw new LlmException("systemPrompt is not configured for " + getName());
-        }
-        return systemPrompt;
-    }
-
-    @Override
-    protected String getIntentDetectionPrompt() {
-        if (intentDetectionPrompt == null) {
-            throw new LlmException("intentDetectionPrompt is not configured for " + getName());
-        }
-        return intentDetectionPrompt;
-    }
-
-    @Override
-    protected String getUnclearIntentSystemPrompt() {
-        if (unclearIntentSystemPrompt == null) {
-            throw new LlmException("unclearIntentSystemPrompt is not configured for " + getName());
-        }
-        return unclearIntentSystemPrompt;
-    }
-
-    @Override
-    protected String getNoResultsSystemPrompt() {
-        if (noResultsSystemPrompt == null) {
-            throw new LlmException("noResultsSystemPrompt is not configured for " + getName());
-        }
-        return noResultsSystemPrompt;
-    }
-
-    @Override
-    protected String getDocumentNotFoundSystemPrompt() {
-        if (documentNotFoundSystemPrompt == null) {
-            throw new LlmException("documentNotFoundSystemPrompt is not configured for " + getName());
-        }
-        return documentNotFoundSystemPrompt;
-    }
-
-    @Override
-    protected String getEvaluationPrompt() {
-        if (evaluationPrompt == null) {
-            throw new LlmException("evaluationPrompt is not configured for " + getName());
-        }
-        return evaluationPrompt;
-    }
-
-    @Override
-    protected String getAnswerGenerationSystemPrompt() {
-        if (answerGenerationSystemPrompt == null) {
-            throw new LlmException("answerGenerationSystemPrompt is not configured for " + getName());
-        }
-        return answerGenerationSystemPrompt;
-    }
-
-    @Override
-    protected String getSummarySystemPrompt() {
-        if (summarySystemPrompt == null) {
-            throw new LlmException("summarySystemPrompt is not configured for " + getName());
-        }
-        return summarySystemPrompt;
-    }
-
-    @Override
-    protected String getFaqAnswerSystemPrompt() {
-        if (faqAnswerSystemPrompt == null) {
-            throw new LlmException("faqAnswerSystemPrompt is not configured for " + getName());
-        }
-        return faqAnswerSystemPrompt;
-    }
-
-    @Override
-    protected String getDirectAnswerSystemPrompt() {
-        if (directAnswerSystemPrompt == null) {
-            throw new LlmException("directAnswerSystemPrompt is not configured for " + getName());
-        }
-        return directAnswerSystemPrompt;
-    }
-
-    @Override
-    protected String getQueryRegenerationPrompt() {
-        if (queryRegenerationPrompt == null) {
-            throw new LlmException("queryRegenerationPrompt is not configured for " + getName());
-        }
-        return queryRegenerationPrompt;
-    }
 }
