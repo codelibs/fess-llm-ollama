@@ -441,7 +441,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     @Override
     protected String getModel() {
-        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.model", "gemma3:4b");
+        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.model", "gemma4:e4b");
     }
 
     @Override
@@ -505,6 +505,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(256);
             }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
             break;
         case "evaluation":
             if (request.getTemperature() == null) {
@@ -512,6 +515,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(512);
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
             }
             break;
         case "unclear":
@@ -523,6 +529,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(512);
             }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
             break;
         case "direct":
         case "faq":
@@ -530,7 +539,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.7);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(1024);
+                request.setMaxTokens(4096);
             }
             break;
         case "answer":
@@ -538,7 +547,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.5);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(2048);
+                request.setMaxTokens(8192);
             }
             break;
         case "summary":
@@ -546,7 +555,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.3);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(2048);
+                request.setMaxTokens(8192);
             }
             break;
         case "queryregeneration":
@@ -555,6 +564,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(256);
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
             }
             break;
         default:
