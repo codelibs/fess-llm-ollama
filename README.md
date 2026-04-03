@@ -32,7 +32,7 @@ Configure the following properties in `fess_config.properties`:
 | `rag.llm.name` | - | Set to `ollama` to use this plugin |
 | `rag.chat.enabled` | `false` | Enable RAG chat feature |
 | `rag.llm.ollama.api.url` | `http://localhost:11434` | Ollama API endpoint URL |
-| `rag.llm.ollama.model` | `gemma3:4b` | Model name (e.g., `llama3:latest`, `mistral`) |
+| `rag.llm.ollama.model` | `gemma4:e4b` | Model name (e.g., `llama3:latest`, `mistral`) |
 | `rag.llm.ollama.timeout` | `60000` | HTTP request timeout in milliseconds |
 | `rag.llm.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability |
 | `rag.llm.ollama.answer.context.max.chars` | `10000` | Maximum characters for document context in answer generation |
@@ -42,7 +42,7 @@ Configure the following properties in `fess_config.properties`:
 
 ### Recommended num_ctx Setting
 
-For `gemma3:4b` with 16GB GPU, set:
+For `gemma4:e4b` with 16GB GPU, set:
 
 ```properties
 rag.llm.ollama.default.num.ctx=8192

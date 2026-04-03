@@ -660,23 +660,23 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     // --- applyDefaultParams thinking tests ---
 
     @Test
-    public void test_applyDefaultParams_intent_noThinkingDefault() {
+    public void test_applyDefaultParams_intent_thinkingDisabledByDefault() {
         final LlmChatRequest request = new LlmChatRequest();
         assertNull(request.getThinkingBudget());
 
         client.applyDefaultParams(request, "intent");
 
-        assertNull(request.getThinkingBudget());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test
-    public void test_applyDefaultParams_evaluation_noThinkingDefault() {
+    public void test_applyDefaultParams_evaluation_thinkingDisabledByDefault() {
         final LlmChatRequest request = new LlmChatRequest();
         assertNull(request.getThinkingBudget());
 
         client.applyDefaultParams(request, "evaluation");
 
-        assertNull(request.getThinkingBudget());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test
