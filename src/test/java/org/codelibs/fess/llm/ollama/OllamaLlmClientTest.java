@@ -22,6 +22,7 @@ import java.util.Map;
 import org.apache.hc.client5.http.config.ConnectionConfig;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.core5.util.Timeout;
@@ -320,6 +321,107 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             final RecordedRequest recordedRequest = server.takeRequest();
             assertEquals("/api/chat", recordedRequest.getPath());
             assertEquals("POST", recordedRequest.getMethod());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_throughProxy_withoutAuth() throws Exception {
+        // With a configured HTTP proxy, HttpClient sends the request to the proxy
+        // with an absolute-form request URI. We use a single MockWebServer as the proxy
+        // and target a non-localhost address to verify routing.
+        final MockWebServer proxyServer = new MockWebServer();
+        try {
+            final String responseJson = "{\"message\":{\"content\":\"ok\"},\"done_reason\":\"stop\","
+                    + "\"model\":\"llama3:latest\",\"prompt_eval_count\":1,\"eval_count\":1,\"done\":true}";
+            proxyServer.enqueue(new MockResponse().setBody(responseJson).setHeader("Content-Type", "application/json"));
+            proxyServer.start();
+
+            client.setTestApiUrl("http://ollama.invalid:11434");
+            client.setTestModel("llama3:latest");
+            client.setTestTimeout(30000);
+            client.setTestProxyHost(proxyServer.getHostName());
+            client.setTestProxyPort(proxyServer.getPort());
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+            final LlmChatResponse response = client.chat(request);
+            assertEquals("ok", response.getContent());
+
+            final RecordedRequest recorded = proxyServer.takeRequest();
+            assertTrue("Expected absolute-form URI starting with http://ollama.invalid:11434/, got: " + recorded.getRequestLine(),
+                    recorded.getRequestLine().contains("http://ollama.invalid:11434/"));
+            assertNull(recorded.getHeader("Proxy-Authorization"), "No proxy auth expected");
+        } finally {
+            proxyServer.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_throughProxy_withBasicAuth() throws Exception {
+        final MockWebServer proxyServer = new MockWebServer();
+        try {
+            // First response: 407 challenges the client to authenticate.
+            proxyServer
+                    .enqueue(new MockResponse().setResponseCode(407).addHeader("Proxy-Authenticate", "Basic realm=\"proxy\"").setBody(""));
+            // Second response: success after the client retries with credentials.
+            final String responseJson = "{\"message\":{\"content\":\"ok\"},\"done_reason\":\"stop\","
+                    + "\"model\":\"llama3:latest\",\"prompt_eval_count\":1,\"eval_count\":1,\"done\":true}";
+            proxyServer.enqueue(new MockResponse().setBody(responseJson).setHeader("Content-Type", "application/json"));
+            proxyServer.start();
+
+            client.setTestApiUrl("http://ollama.invalid:11434");
+            client.setTestModel("llama3:latest");
+            client.setTestTimeout(30000);
+            client.setTestProxyHost(proxyServer.getHostName());
+            client.setTestProxyPort(proxyServer.getPort());
+            client.setTestProxyUsername("proxyuser");
+            client.setTestProxyPassword("proxypass");
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+            final LlmChatResponse response = client.chat(request);
+            assertEquals("ok", response.getContent());
+
+            final RecordedRequest first = proxyServer.takeRequest();
+            assertNull(first.getHeader("Proxy-Authorization"));
+            final RecordedRequest second = proxyServer.takeRequest();
+            final String auth = second.getHeader("Proxy-Authorization");
+            assertNotNull(auth, "Proxy-Authorization header expected on retry");
+            final String expected = "Basic "
+                    + java.util.Base64.getEncoder().encodeToString("proxyuser:proxypass".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertEquals(expected, auth);
+        } finally {
+            proxyServer.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_noProxy_directConnection() throws Exception {
+        // When proxy host is blank, requests go directly to the target server (origin-form URI).
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String responseJson = "{\"message\":{\"content\":\"direct\"},\"done_reason\":\"stop\","
+                    + "\"model\":\"llama3:latest\",\"prompt_eval_count\":1,\"eval_count\":1,\"done\":true}";
+            server.enqueue(new MockResponse().setBody(responseJson).setHeader("Content-Type", "application/json"));
+            server.start();
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            client.setTestModel("llama3:latest");
+            client.setTestTimeout(30000);
+            // Proxy unset - direct connection
+            client.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+            final LlmChatResponse response = client.chat(request);
+            assertEquals("direct", response.getContent());
+
+            final RecordedRequest recorded = server.takeRequest();
+            assertEquals("/api/chat", recorded.getPath());
         } finally {
             server.shutdown();
         }
@@ -830,6 +932,10 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         private int testTimeout = 30000;
         private double testTemperature = 0.7;
         private int testMaxTokens = 1000;
+        private String testProxyHost = "";
+        private Integer testProxyPort = null;
+        private String testProxyUsername = "";
+        private String testProxyPassword = "";
 
         void setTestApiUrl(final String apiUrl) {
             this.testApiUrl = apiUrl;
@@ -849,6 +955,42 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
         void setTestMaxTokens(final int maxTokens) {
             this.testMaxTokens = maxTokens;
+        }
+
+        void setTestProxyHost(final String proxyHost) {
+            this.testProxyHost = proxyHost;
+        }
+
+        void setTestProxyPort(final Integer proxyPort) {
+            this.testProxyPort = proxyPort;
+        }
+
+        void setTestProxyUsername(final String proxyUsername) {
+            this.testProxyUsername = proxyUsername;
+        }
+
+        void setTestProxyPassword(final String proxyPassword) {
+            this.testProxyPassword = proxyPassword;
+        }
+
+        @Override
+        protected String getProxyHost() {
+            return testProxyHost;
+        }
+
+        @Override
+        protected Integer getProxyPort() {
+            return testProxyPort;
+        }
+
+        @Override
+        protected String getProxyUsername() {
+            return testProxyUsername;
+        }
+
+        @Override
+        protected String getProxyPassword() {
+            return testProxyPassword;
         }
 
         @Override
@@ -921,14 +1063,15 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
                     .setConnectionRequestTimeout(Timeout.ofMilliseconds(timeout))
                     .setResponseTimeout(Timeout.ofMilliseconds(timeout))
                     .build();
-            httpClient = HttpClients.custom()
+            final HttpClientBuilder builder = HttpClients.custom()
                     .setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
                             .setDefaultConnectionConfig(
                                     ConnectionConfig.custom().setConnectTimeout(Timeout.ofMilliseconds(timeout)).build())
                             .build())
                     .setDefaultRequestConfig(requestConfig)
-                    .disableAutomaticRetries()
-                    .build();
+                    .disableAutomaticRetries();
+            configureProxy(builder);
+            httpClient = builder.build();
         }
     }
 }
