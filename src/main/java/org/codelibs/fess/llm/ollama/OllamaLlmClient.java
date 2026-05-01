@@ -241,17 +241,14 @@ public class OllamaLlmClient extends AbstractLlmClient {
             executeWithRetry("streamChat", () -> {
                 final HttpPost httpRequest = new HttpPost(url);
                 httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
-                final var response = getHttpClient().execute(httpRequest);
-                try {
+                try (var response = getHttpClient().execute(httpRequest)) {
                     final int statusCode = response.getCode();
                     if (statusCode < 200 || statusCode >= 300) {
                         if (isRetryableStatus(statusCode)) {
-                            response.close();
                             throw new RetryableHttpException(statusCode, response.getReasonPhrase());
                         }
                         logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}", url, statusCode,
                                 response.getReasonPhrase());
-                        response.close();
                         throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
                                 resolveErrorCode(statusCode));
                     }
@@ -271,19 +268,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
                     if (response.getEntity() == null) {
                         logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
-                        response.close();
                         throw new LlmException("Empty response from Ollama");
                     }
 
                     consumeStream(requestBody, response, callback, startTime);
                     return null;
-                } catch (final RuntimeException | IOException e) {
-                    try {
-                        response.close();
-                    } catch (final IOException closeEx) {
-                        // ignore
-                    }
-                    throw e;
                 }
             });
         } catch (final LlmException e) {

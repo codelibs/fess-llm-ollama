@@ -439,21 +439,12 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     public void test_chat_apiError() throws Exception {
         final MockWebServer server = new MockWebServer();
         try {
-            server.enqueue(new MockResponse().setResponseCode(500).setBody("Internal Server Error"));
+            // Use a non-retryable status (400) so this exercises the in-lambda
+            // LlmException path with the "Ollama API error: <code> <reason>" message.
+            server.enqueue(new MockResponse().setResponseCode(400).setBody("Bad Request"));
             server.start();
 
-            // Use a single-attempt client so the retryable 500 surfaces immediately.
-            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-                @Override
-                protected int getRetryMaxAttempts() {
-                    return 1;
-                }
-
-                @Override
-                protected long getRetryBaseDelayMs() {
-                    return 1L;
-                }
-            };
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
             localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
             localClient.setTestModel("llama3:latest");
             localClient.setTestTemperature(0.7);
@@ -467,8 +458,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
                 localClient.chat(request);
                 fail("Expected LlmException");
             } catch (final LlmException e) {
-                assertTrue(e.getMessage().contains("Ollama API"));
+                assertTrue(e.getMessage().contains("Ollama API error"));
             }
+            assertEquals("400 must not be retried", 1, server.getRequestCount());
         } finally {
             server.shutdown();
         }
@@ -524,21 +516,12 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     public void test_streamChat_apiError() throws Exception {
         final MockWebServer server = new MockWebServer();
         try {
-            server.enqueue(new MockResponse().setResponseCode(503).setBody("Service Unavailable"));
+            // Use a non-retryable status (400) so this exercises the in-lambda
+            // LlmException path with the "Ollama API error: <code> <reason>" message.
+            server.enqueue(new MockResponse().setResponseCode(400).setBody("Bad Request"));
             server.start();
 
-            // Use a single-attempt client so the retryable 503 surfaces immediately.
-            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-                @Override
-                protected int getRetryMaxAttempts() {
-                    return 1;
-                }
-
-                @Override
-                protected long getRetryBaseDelayMs() {
-                    return 1L;
-                }
-            };
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
             localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
             localClient.setTestModel("llama3:latest");
             localClient.setTestTemperature(0.7);
@@ -564,10 +547,11 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
                 });
                 fail("Expected LlmException");
             } catch (final LlmException e) {
-                assertTrue(e.getMessage().contains("Ollama API"));
+                assertTrue(e.getMessage().contains("Ollama API error"));
             }
 
             assertEquals(1, errors.size());
+            assertEquals("400 must not be retried", 1, server.getRequestCount());
         } finally {
             server.shutdown();
         }
@@ -1246,17 +1230,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
     @Test
     public void test_executeWithRetry_throwsIOExceptionAfterExhaustion() {
-        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-            @Override
-            protected int getRetryMaxAttempts() {
-                return 2;
-            }
-
-            @Override
-            protected long getRetryBaseDelayMs() {
-                return 1L; // keep test fast
-            }
-        };
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestRetryMax(2);
+        localClient.setTestRetryBaseDelayMs(1L); // keep test fast
         final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
         try {
             localClient.executeWithRetry("test", () -> {
@@ -1272,17 +1248,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
     @Test
     public void test_executeWithRetry_succeedsAfterOneFailure() throws Exception {
-        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-            @Override
-            protected int getRetryMaxAttempts() {
-                return 3;
-            }
-
-            @Override
-            protected long getRetryBaseDelayMs() {
-                return 1L;
-            }
-        };
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestRetryMax(3);
+        localClient.setTestRetryBaseDelayMs(1L);
         final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
         final String result = localClient.executeWithRetry("test", () -> {
             if (callCount.incrementAndGet() == 1) {
@@ -1296,17 +1264,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
     @Test
     public void test_executeWithRetry_retriesOnIOException() throws Exception {
-        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-            @Override
-            protected int getRetryMaxAttempts() {
-                return 3;
-            }
-
-            @Override
-            protected long getRetryBaseDelayMs() {
-                return 1L;
-            }
-        };
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestRetryMax(3);
+        localClient.setTestRetryBaseDelayMs(1L);
         final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
         final String result = localClient.executeWithRetry("test", () -> {
             if (callCount.incrementAndGet() == 1) {
@@ -1320,17 +1280,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
     @Test
     public void test_executeWithRetry_throwsLastIOExceptionAfterExhaustion() {
-        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-            @Override
-            protected int getRetryMaxAttempts() {
-                return 2;
-            }
-
-            @Override
-            protected long getRetryBaseDelayMs() {
-                return 1L;
-            }
-        };
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestRetryMax(2);
+        localClient.setTestRetryBaseDelayMs(1L);
         final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
         try {
             localClient.executeWithRetry("test", () -> {
@@ -1355,17 +1307,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         server.enqueue(new MockResponse().setHeader("Content-Type", "application/json").setBody(successBody));
         server.start();
         try {
-            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-                @Override
-                protected int getRetryMaxAttempts() {
-                    return 3;
-                }
-
-                @Override
-                protected long getRetryBaseDelayMs() {
-                    return 1L;
-                }
-            };
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
             localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
             localClient.initHttpClient();
             final LlmChatRequest request = new LlmChatRequest();
@@ -1387,17 +1331,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(successBody));
         server.start();
         try {
-            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-                @Override
-                protected int getRetryMaxAttempts() {
-                    return 3;
-                }
-
-                @Override
-                protected long getRetryBaseDelayMs() {
-                    return 1L;
-                }
-            };
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
             localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
             localClient.initHttpClient();
             final LlmChatRequest request = new LlmChatRequest();
@@ -1417,17 +1353,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         server.enqueue(new MockResponse().setResponseCode(404).setBody("model not found"));
         server.start();
         try {
-            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-                @Override
-                protected int getRetryMaxAttempts() {
-                    return 5;
-                }
-
-                @Override
-                protected long getRetryBaseDelayMs() {
-                    return 1L;
-                }
-            };
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(5);
+            localClient.setTestRetryBaseDelayMs(1L);
             localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
             localClient.initHttpClient();
             final LlmChatRequest request = new LlmChatRequest();
@@ -1452,17 +1380,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         server.enqueue(new MockResponse().setResponseCode(503));
         server.start();
         try {
-            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-                @Override
-                protected int getRetryMaxAttempts() {
-                    return 3;
-                }
-
-                @Override
-                protected long getRetryBaseDelayMs() {
-                    return 1L;
-                }
-            };
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
             localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
             localClient.initHttpClient();
             final LlmChatRequest request = new LlmChatRequest();
@@ -1488,17 +1408,9 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         server.enqueue(new MockResponse().setHeader("Content-Type", "application/json").setBody(successBody));
         server.start();
         try {
-            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
-                @Override
-                protected int getRetryMaxAttempts() {
-                    return 3;
-                }
-
-                @Override
-                protected long getRetryBaseDelayMs() {
-                    return 1L;
-                }
-            };
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
             localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
             localClient.initHttpClient();
             final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
@@ -1532,6 +1444,8 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         private Integer testProxyPort = null;
         private String testProxyUsername = "";
         private String testProxyPassword = "";
+        private int testRetryMax = 3;
+        private long testRetryBaseDelayMs = 2000L;
 
         void setTestApiUrl(final String apiUrl) {
             this.testApiUrl = apiUrl;
@@ -1567,6 +1481,24 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
         void setTestProxyPassword(final String proxyPassword) {
             this.testProxyPassword = proxyPassword;
+        }
+
+        void setTestRetryMax(final int max) {
+            this.testRetryMax = max;
+        }
+
+        void setTestRetryBaseDelayMs(final long ms) {
+            this.testRetryBaseDelayMs = ms;
+        }
+
+        @Override
+        protected int getRetryMaxAttempts() {
+            return testRetryMax;
+        }
+
+        @Override
+        protected long getRetryBaseDelayMs() {
+            return testRetryBaseDelayMs;
         }
 
         @Override
