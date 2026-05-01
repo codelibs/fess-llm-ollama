@@ -59,6 +59,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
     /** The name identifier for the Ollama LLM client. */
     protected static final String NAME = "ollama";
 
+    /** Hard cap on a single backoff sleep, regardless of computed delay. */
+    private static final long MAX_BACKOFF_MS = 60_000L;
+
     /**
      * Default constructor.
      */
@@ -783,7 +786,13 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @return the value of {@code rag.llm.ollama.retry.base.delay.ms} (default {@code 2000}).
      */
     protected long getRetryBaseDelayMs() {
-        return Long.parseLong(ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + ".retry.base.delay.ms", "2000"));
+        final String raw = ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + ".retry.base.delay.ms", "2000");
+        try {
+            return Long.parseLong(raw);
+        } catch (final NumberFormatException e) {
+            logger.warn("[LLM:OLLAMA] Invalid {}.retry.base.delay.ms='{}', using default 2000ms", getConfigPrefix(), raw);
+            return 2000L;
+        }
     }
 
     /**
@@ -814,34 +823,48 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     logger.warn("[LLM:OLLAMA] {} retry exhausted. attempts={}, lastStatus={}", operation, attempt, e.statusCode);
                     throw new IOException("Ollama API retryable error: " + e.statusCode + " " + e.reason, e);
                 }
-                final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
-                final long delay = (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter;
-                logger.info("[LLM:OLLAMA] {} retrying. attempt={}/{}, status={}, sleepMs={}", operation, attempt, maxAttempts, e.statusCode,
-                        Math.max(0, delay));
-                try {
-                    Thread.sleep(Math.max(0, delay));
-                } catch (final InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Retry interrupted", ie);
-                }
+                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "status", e.statusCode);
             } catch (final IOException e) {
                 if (attempt == maxAttempts) {
                     lastIo = e;
                     break;
                 }
-                final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
-                final long delay = (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter;
-                logger.info("[LLM:OLLAMA] {} retrying. attempt={}/{}, exception={}, sleepMs={}", operation, attempt, maxAttempts,
-                        e.getClass().getSimpleName(), Math.max(0, delay));
-                try {
-                    Thread.sleep(Math.max(0, delay));
-                } catch (final InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Retry interrupted", ie);
-                }
+                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "exception", e.getClass().getSimpleName());
             }
         }
+        if (lastIo == null) {
+            // Defensive: should be unreachable because Math.max(1, ...) ensures the
+            // for-loop runs at least once and either returns, throws, or assigns lastIo.
+            throw new IllegalStateException("executeWithRetry exited without exception or success");
+        }
         throw lastIo;
+    }
+
+    /**
+     * Sleeps an exponential-backoff interval with +/-20% jitter and a hard cap.
+     * Logs the retry decision at INFO. Restores interrupt status if interrupted.
+     *
+     * @param operation log label.
+     * @param attempt 1-based current attempt index.
+     * @param maxAttempts total attempts including the first.
+     * @param baseDelay base delay in milliseconds (already clamped to >=0).
+     * @param logFieldKey log field name carrying the cause ("status" or "exception").
+     * @param logFieldValue log field value for the cause.
+     * @throws IOException if the sleep is interrupted.
+     */
+    private void sleepBackoff(final String operation, final int attempt, final int maxAttempts, final long baseDelay,
+            final String logFieldKey, final Object logFieldValue) throws IOException {
+        final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+        final long delay = Math.min(MAX_BACKOFF_MS, (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter);
+        final long sleepMs = Math.max(0, delay);
+        logger.info("[LLM:OLLAMA] {} retrying. attempt={}/{}, {}={}, sleepMs={}", operation, attempt, maxAttempts, logFieldKey,
+                logFieldValue, sleepMs);
+        try {
+            Thread.sleep(sleepMs);
+        } catch (final InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Retry interrupted", ie);
+        }
     }
 
 }

@@ -1270,6 +1270,56 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         assertEquals(2, callCount.get());
     }
 
+    @Test
+    public void test_executeWithRetry_retriesOnIOException() throws Exception {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+            @Override
+            protected int getRetryMaxAttempts() {
+                return 3;
+            }
+
+            @Override
+            protected long getRetryBaseDelayMs() {
+                return 1L;
+            }
+        };
+        final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
+        final String result = localClient.executeWithRetry("test", () -> {
+            if (callCount.incrementAndGet() == 1) {
+                throw new java.net.ConnectException("connection refused");
+            }
+            return "ok";
+        });
+        assertEquals("ok", result);
+        assertEquals(2, callCount.get());
+    }
+
+    @Test
+    public void test_executeWithRetry_throwsLastIOExceptionAfterExhaustion() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+            @Override
+            protected int getRetryMaxAttempts() {
+                return 2;
+            }
+
+            @Override
+            protected long getRetryBaseDelayMs() {
+                return 1L;
+            }
+        };
+        final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
+        try {
+            localClient.executeWithRetry("test", () -> {
+                callCount.incrementAndGet();
+                throw new java.net.ConnectException("connection refused attempt " + callCount.get());
+            });
+            fail("expected IOException");
+        } catch (final java.io.IOException e) {
+            assertTrue(e.getMessage().contains("connection refused attempt 2"));
+            assertEquals(2, callCount.get());
+        }
+    }
+
     // --- Testable subclass ---
 
     static class TestableOllamaLlmClient extends OllamaLlmClient {
