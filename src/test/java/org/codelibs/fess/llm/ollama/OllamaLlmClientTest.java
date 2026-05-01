@@ -815,52 +815,68 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
     @Test
     public void test_applyPromptTypeParams_thinkingBudgetFromConfig() {
+        final List<String> queriedPrimary = new ArrayList<>();
         final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
             @Override
             protected String getConfigWithFallback(final String primaryKey, final String fallbackKey) {
-                if ((getConfigPrefix() + ".answer.thinking.budget").equals(primaryKey)) {
+                queriedPrimary.add(primaryKey);
+                if ("rag.llm.ollama.answer.thinking.budget".equals(primaryKey)) {
                     return "4096";
                 }
                 return null;
             }
         };
         final LlmChatRequest request = new LlmChatRequest();
-        request.setMessages(java.util.List.of(new LlmMessage("user", "hello")));
+        request.setMessages(List.of(new LlmMessage("user", "hello")));
         localClient.applyPromptTypeParams(request, "answer");
         assertEquals(Integer.valueOf(4096), request.getThinkingBudget());
+        assertTrue("expected lookup of rag.llm.ollama.answer.thinking.budget, queried=" + queriedPrimary,
+                queriedPrimary.contains("rag.llm.ollama.answer.thinking.budget"));
     }
 
     @Test
     public void test_applyPromptTypeParams_thinkingBudgetHardcodedFallbackForIntent() {
+        final List<String> queriedPrimary = new ArrayList<>();
         final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
             @Override
             protected String getConfigWithFallback(final String primaryKey, final String fallbackKey) {
+                queriedPrimary.add(primaryKey);
                 return null; // no config set
             }
         };
         final LlmChatRequest request = new LlmChatRequest();
-        request.setMessages(java.util.List.of(new LlmMessage("user", "hello")));
+        request.setMessages(List.of(new LlmMessage("user", "hello")));
         localClient.applyPromptTypeParams(request, "intent");
-        // intent hardcodes thinkingBudget=0 in applyDefaultParams (line 508-510)
+        // intent's hardcoded default in applyDefaultParams is 0
         assertEquals(Integer.valueOf(0), request.getThinkingBudget());
+        assertTrue("expected lookup of rag.llm.ollama.intent.thinking.budget, queried=" + queriedPrimary,
+                queriedPrimary.contains("rag.llm.ollama.intent.thinking.budget"));
     }
 
     @Test
     public void test_applyPromptTypeParams_thinkingBudgetFromDefaultFallback() {
+        final List<String> queriedPrimary = new ArrayList<>();
+        final List<String> queriedFallback = new ArrayList<>();
         final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
             @Override
             protected String getConfigWithFallback(final String primaryKey, final String fallbackKey) {
+                queriedPrimary.add(primaryKey);
+                queriedFallback.add(fallbackKey);
                 // No per-type key, but default.thinking.budget is set
-                if ((getConfigPrefix() + ".default.thinking.budget").equals(fallbackKey)) {
+                if ("rag.llm.ollama.default.thinking.budget".equals(fallbackKey)) {
                     return "2048";
                 }
                 return null;
             }
         };
         final LlmChatRequest request = new LlmChatRequest();
-        request.setMessages(java.util.List.of(new LlmMessage("user", "hello")));
+        request.setMessages(List.of(new LlmMessage("user", "hello")));
         localClient.applyPromptTypeParams(request, "answer");
         assertEquals(Integer.valueOf(2048), request.getThinkingBudget());
+        assertTrue("expected fallback lookup of rag.llm.ollama.default.thinking.budget, queriedFallback=" + queriedFallback,
+                queriedFallback.contains("rag.llm.ollama.default.thinking.budget"));
+        assertTrue("expected primary lookup of rag.llm.ollama.answer.thinking.budget, queriedPrimary=" + queriedPrimary,
+                queriedPrimary.contains("rag.llm.ollama.answer.thinking.budget"));
     }
 
     // --- gemma3 compatibility tests (non-reasoning model) ---
