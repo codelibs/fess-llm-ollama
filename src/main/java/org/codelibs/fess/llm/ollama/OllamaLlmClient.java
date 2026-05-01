@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
@@ -31,6 +32,7 @@ import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.client5.http.config.ConnectionConfig;
 import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
@@ -68,6 +70,13 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     /** Hard cap on a single backoff sleep, regardless of computed delay. */
     private static final long MAX_BACKOFF_MS = 60_000L;
+
+    /** done_reason values that indicate a normal stream termination. */
+    private static final Set<String> NORMAL_DONE_REASONS = Set.of("stop", "load", "unload");
+
+    private static final String CONFIG_RETRY_MAX = "retry.max";
+    private static final String CONFIG_RETRY_BASE_DELAY_MS = "retry.base.delay.ms";
+    private static final String CONFIG_CONNECT_TIMEOUT = "connect.timeout";
 
     /**
      * Default constructor.
@@ -194,14 +203,18 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     final JsonNode jsonNode = objectMapper.readTree(responseBody);
 
                     final LlmChatResponse chatResponse = new LlmChatResponse();
-                    if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
-                        chatResponse.setContent(jsonNode.get("message").get("content").asText());
+                    final JsonNode messageNode = jsonNode.path("message");
+                    final String content = messageNode.path("content").asText(null);
+                    if (content != null) {
+                        chatResponse.setContent(content);
                     }
-                    if (jsonNode.has("done_reason")) {
-                        chatResponse.setFinishReason(jsonNode.get("done_reason").asText());
+                    final String finishReason = jsonNode.path("done_reason").asText(null);
+                    if (finishReason != null) {
+                        chatResponse.setFinishReason(finishReason);
                     }
-                    if (jsonNode.has("model")) {
-                        chatResponse.setModel(jsonNode.get("model").asText());
+                    final String responseModel = jsonNode.path("model").asText(null);
+                    if (responseModel != null) {
+                        chatResponse.setModel(responseModel);
                     }
                     if (jsonNode.has("prompt_eval_count")) {
                         chatResponse.setPromptTokens(jsonNode.get("prompt_eval_count").asInt());
@@ -209,9 +222,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     if (jsonNode.has("eval_count")) {
                         chatResponse.setCompletionTokens(jsonNode.get("eval_count").asInt());
                     }
-                    if (logger.isDebugEnabled() && jsonNode.has("message") && jsonNode.get("message").has("thinking")) {
-                        final String thinking = jsonNode.get("message").get("thinking").asText();
-                        logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinking.length());
+                    if (logger.isDebugEnabled()) {
+                        final JsonNode thinkingNode = messageNode.path("thinking");
+                        if (!thinkingNode.isMissingNode()) {
+                            logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinkingNode.asText().length());
+                        }
                     }
                     logger.info(
                             "[LLM:OLLAMA] Chat response received. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
@@ -278,7 +293,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                         throw new LlmException("Empty response from Ollama");
                     }
 
-                    consumeStream(requestBody, response, callback, startTime);
+                    consumeStream((String) requestBody.get("model"), response, callback, startTime);
                     return null;
                 }
             });
@@ -297,15 +312,14 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * Consumes the NDJSON streaming body and emits chunks via {@code callback}.
      * Caller is responsible for closing {@code response}.
      *
-     * @param requestBody the request body (used for log context).
+     * @param model the model name (used for log context).
      * @param response the HTTP response holding the NDJSON entity.
      * @param callback the stream callback to invoke for each chunk.
      * @param startTime the millisecond timestamp captured before the request, for elapsed-time logs.
      * @throws IOException if reading the stream fails.
      */
-    private void consumeStream(final Map<String, Object> requestBody,
-            final org.apache.hc.client5.http.impl.classic.CloseableHttpResponse response, final LlmStreamCallback callback,
-            final long startTime) throws IOException {
+    private void consumeStream(final String model, final org.apache.hc.client5.http.impl.classic.CloseableHttpResponse response,
+            final LlmStreamCallback callback, final long startTime) throws IOException {
         int chunkCount = 0;
         int objectCount = 0;
         int parseErrorCount = 0;
@@ -328,9 +342,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     objectCount++;
                     final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
 
-                    if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
-                        final String content = jsonNode.get("message").get("content").asText();
-                        if (content.isEmpty() && !done && jsonNode.get("message").has("thinking")) {
+                    final JsonNode messageNode = jsonNode.path("message");
+                    final JsonNode contentNode = messageNode.path("content");
+                    if (!contentNode.isMissingNode()) {
+                        final String content = contentNode.asText();
+                        if (content.isEmpty() && !done && !messageNode.path("thinking").isMissingNode()) {
                             // Skip thinking-only chunk
                             continue;
                         }
@@ -344,27 +360,13 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     }
 
                     if (done) {
-                        if (jsonNode.has("done_reason")) {
-                            doneReason = jsonNode.get("done_reason").asText();
-                        }
-                        if (jsonNode.has("total_duration")) {
-                            totalDurationNs = jsonNode.get("total_duration").asLong();
-                        }
-                        if (jsonNode.has("load_duration")) {
-                            loadDurationNs = jsonNode.get("load_duration").asLong();
-                        }
-                        if (jsonNode.has("prompt_eval_duration")) {
-                            promptEvalDurationNs = jsonNode.get("prompt_eval_duration").asLong();
-                        }
-                        if (jsonNode.has("eval_duration")) {
-                            evalDurationNs = jsonNode.get("eval_duration").asLong();
-                        }
-                        if (jsonNode.has("prompt_eval_count")) {
-                            promptEvalCount = jsonNode.get("prompt_eval_count").asInt();
-                        }
-                        if (jsonNode.has("eval_count")) {
-                            evalCount = jsonNode.get("eval_count").asInt();
-                        }
+                        doneReason = jsonNode.path("done_reason").asText(null);
+                        totalDurationNs = jsonNode.path("total_duration").asLong(0L);
+                        loadDurationNs = jsonNode.path("load_duration").asLong(0L);
+                        promptEvalDurationNs = jsonNode.path("prompt_eval_duration").asLong(0L);
+                        evalDurationNs = jsonNode.path("eval_duration").asLong(0L);
+                        promptEvalCount = jsonNode.path("prompt_eval_count").asInt(0);
+                        evalCount = jsonNode.path("eval_count").asInt(0);
                         break;
                     }
                 } catch (final JsonProcessingException e) {
@@ -384,9 +386,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 loadDurationNs / 1_000_000L, promptEvalDurationNs / 1_000_000L, evalDurationMs, promptEvalCount, evalCount, tokensPerSecond,
                 parseErrorCount);
 
-        if (doneReason != null && !"stop".equals(doneReason) && !"load".equals(doneReason) && !"unload".equals(doneReason)) {
+        if (doneReason != null && !NORMAL_DONE_REASONS.contains(doneReason)) {
             logger.warn("[LLM:OLLAMA] Stream finished abnormally. doneReason={}, evalCount={}, " + "promptEvalCount={}, model={}",
-                    doneReason, evalCount, promptEvalCount, requestBody.get("model"));
+                    doneReason, evalCount, promptEvalCount, model);
         }
     }
 
@@ -555,7 +557,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @return the connect timeout in milliseconds.
      */
     protected int getConnectTimeout() {
-        return getConfigInt("connect.timeout", 5000);
+        return getConfigInt(CONFIG_CONNECT_TIMEOUT, 5000);
     }
 
     /**
@@ -576,6 +578,31 @@ public class OllamaLlmClient extends AbstractLlmClient {
             return;
         }
 
+        if (httpClient != null) {
+            // Defensive: re-init scenarios should release the prior pool before swapping.
+            try {
+                httpClient.close();
+            } catch (final IOException e) {
+                logger.warn("[LLM:OLLAMA] Failed to close prior HTTP client during re-init", e);
+            }
+        }
+        httpClient = buildHttpClient();
+        if (logger.isDebugEnabled()) {
+            logger.debug("[LLM:OLLAMA] {} initialized. model={}, connectTimeout={}ms, responseTimeout={}ms, maxConcurrent={}", getName(),
+                    getModel(), getConnectTimeout(), getTimeout(), getMaxConcurrentRequests());
+        }
+
+        concurrencyLimiter = new Semaphore(getMaxConcurrentRequests());
+        startAvailabilityCheck();
+    }
+
+    /**
+     * Builds the {@link CloseableHttpClient} with two-tier timeouts (connect vs response/read)
+     * and the shared proxy configuration. Used by {@link #init()} and mirrored by tests.
+     *
+     * @return a configured {@link CloseableHttpClient}.
+     */
+    protected CloseableHttpClient buildHttpClient() {
         final int connectTimeout = getConnectTimeout();
         final int responseTimeout = getTimeout();
         final RequestConfig requestConfig = RequestConfig.custom()
@@ -590,17 +617,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 .setDefaultRequestConfig(requestConfig)
                 .disableAutomaticRetries();
         configureProxy(builder);
-        httpClient = builder.build();
-        if (logger.isDebugEnabled()) {
-            logger.debug("[LLM:OLLAMA] Initialized. connectTimeout={}ms, responseTimeout={}ms", connectTimeout, responseTimeout);
-        }
-        if (logger.isDebugEnabled()) {
-            logger.debug("[LLM] {} initialized. model={}, connectTimeout={}ms, responseTimeout={}ms, maxConcurrent={}", getName(),
-                    getModel(), connectTimeout, responseTimeout, getMaxConcurrentRequests());
-        }
-
-        concurrencyLimiter = new Semaphore(getMaxConcurrentRequests());
-        startAvailabilityCheck();
+        return builder.build();
     }
 
     @Override
@@ -869,7 +886,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @return the value of {@code rag.llm.ollama.retry.max} (default {@code 3}).
      */
     protected int getRetryMaxAttempts() {
-        return getConfigInt("retry.max", 3);
+        return getConfigInt(CONFIG_RETRY_MAX, 3);
     }
 
     /**
@@ -878,11 +895,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @return the value of {@code rag.llm.ollama.retry.base.delay.ms} (default {@code 2000}).
      */
     protected long getRetryBaseDelayMs() {
-        final String raw = ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + ".retry.base.delay.ms", "2000");
+        final String raw = ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + "." + CONFIG_RETRY_BASE_DELAY_MS, "2000");
         try {
             return Long.parseLong(raw);
         } catch (final NumberFormatException e) {
-            logger.warn("[LLM:OLLAMA] Invalid {}.retry.base.delay.ms='{}', using default 2000ms", getConfigPrefix(), raw);
+            logger.warn("[LLM:OLLAMA] Invalid {}.{}='{}', using default 2000ms", getConfigPrefix(), CONFIG_RETRY_BASE_DELAY_MS, raw);
             return 2000L;
         }
     }
@@ -925,8 +942,6 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
         }
         if (lastIo == null) {
-            // Defensive: should be unreachable because Math.max(1, ...) ensures the
-            // for-loop runs at least once and either returns, throws, or assigns lastIo.
             throw new IllegalStateException("executeWithRetry exited without exception or success");
         }
         throw lastIo;

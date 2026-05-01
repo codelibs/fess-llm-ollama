@@ -21,13 +21,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import org.apache.hc.client5.http.config.ConnectionConfig;
-import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
-import org.apache.hc.core5.util.Timeout;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
@@ -146,8 +140,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     @Test
     public void test_buildRequestBody_withDefaults() {
         client.setTestModel("llama3:latest");
-        client.setTestTemperature(0.7);
-        client.setTestMaxTokens(1000);
 
         final LlmChatRequest request = new LlmChatRequest();
         request.addMessage(new LlmMessage("user", "Hello"));
@@ -175,8 +167,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     @Test
     public void test_buildRequestBody_withRequestOverrides() {
         client.setTestModel("llama3:latest");
-        client.setTestTemperature(0.7);
-        client.setTestMaxTokens(1000);
 
         final LlmChatRequest request = new LlmChatRequest();
         request.addMessage(new LlmMessage("user", "Hello"));
@@ -198,8 +188,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     @Test
     public void test_buildRequestBody_withMultipleMessages() {
         client.setTestModel("llama3:latest");
-        client.setTestTemperature(0.7);
-        client.setTestMaxTokens(1000);
 
         final LlmChatRequest request = new LlmChatRequest();
         request.addMessage(new LlmMessage("system", "You are a helpful assistant."));
@@ -334,8 +322,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
             client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
             client.setTestModel("llama3:latest");
-            client.setTestTemperature(0.7);
-            client.setTestMaxTokens(1000);
             client.initHttpClient();
 
             final LlmChatRequest request = new LlmChatRequest();
@@ -471,8 +457,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
             localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
             localClient.setTestModel("llama3:latest");
-            localClient.setTestTemperature(0.7);
-            localClient.setTestMaxTokens(1000);
             localClient.initHttpClient();
 
             final LlmChatRequest request = new LlmChatRequest();
@@ -501,8 +485,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
             client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
             client.setTestModel("llama3:latest");
-            client.setTestTemperature(0.7);
-            client.setTestMaxTokens(1000);
             client.initHttpClient();
 
             final LlmChatRequest request = new LlmChatRequest();
@@ -548,8 +530,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
             localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
             localClient.setTestModel("llama3:latest");
-            localClient.setTestTemperature(0.7);
-            localClient.setTestMaxTokens(1000);
             localClient.initHttpClient();
 
             final LlmChatRequest request = new LlmChatRequest();
@@ -1217,7 +1197,7 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         assertEquals(500, client.testGetHistoryAssistantMaxChars());
     }
 
-    // --- Retry helpers (Task 5) ---
+    // --- Retry helpers ---
 
     @Test
     public void test_isRetryableStatus_retriesServerErrors() {
@@ -1320,7 +1300,7 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         }
     }
 
-    // --- chat() / streamChat() retry wiring (Task 6) ---
+    // --- chat() / streamChat() retry wiring ---
 
     @Test
     public void test_chat_retriesOn503() throws Exception {
@@ -1463,8 +1443,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         private String testModel = "llama3:latest";
         private int testTimeout = 30000;
         private int testConnectTimeout = 5000;
-        private double testTemperature = 0.7;
-        private int testMaxTokens = 1000;
         private String testProxyHost = "";
         private Integer testProxyPort = null;
         private String testProxyUsername = "";
@@ -1491,14 +1469,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         @Override
         protected int getConnectTimeout() {
             return testConnectTimeout;
-        }
-
-        void setTestTemperature(final double temperature) {
-            this.testTemperature = temperature;
-        }
-
-        void setTestMaxTokens(final int maxTokens) {
-            this.testMaxTokens = maxTokens;
         }
 
         void setTestProxyHost(final String proxyHost) {
@@ -1570,14 +1540,6 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             return testTimeout;
         }
 
-        protected double getTemperature() {
-            return testTemperature;
-        }
-
-        protected int getMaxTokens() {
-            return testMaxTokens;
-        }
-
         @Override
         protected int getHistoryMaxChars() {
             return 4000;
@@ -1620,21 +1582,7 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         }
 
         void initHttpClient() {
-            final int connectTimeout = getConnectTimeout();
-            final int responseTimeout = getTimeout();
-            final RequestConfig requestConfig = RequestConfig.custom()
-                    .setConnectionRequestTimeout(Timeout.ofMilliseconds(connectTimeout))
-                    .setResponseTimeout(Timeout.ofMilliseconds(responseTimeout))
-                    .build();
-            final HttpClientBuilder builder = HttpClients.custom()
-                    .setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
-                            .setDefaultConnectionConfig(
-                                    ConnectionConfig.custom().setConnectTimeout(Timeout.ofMilliseconds(connectTimeout)).build())
-                            .build())
-                    .setDefaultRequestConfig(requestConfig)
-                    .disableAutomaticRetries();
-            configureProxy(builder);
-            httpClient = builder.build();
+            httpClient = buildHttpClient();
         }
     }
 
