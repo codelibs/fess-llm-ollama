@@ -1185,6 +1185,91 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         assertEquals(500, client.testGetHistoryAssistantMaxChars());
     }
 
+    // --- Retry helpers (Task 5) ---
+
+    @Test
+    public void test_isRetryableStatus_retriesServerErrors() {
+        assertTrue(OllamaLlmClient.isRetryableStatus(500));
+        assertTrue(OllamaLlmClient.isRetryableStatus(503));
+        assertTrue(OllamaLlmClient.isRetryableStatus(504));
+    }
+
+    @Test
+    public void test_isRetryableStatus_doesNotRetry429Or4xx() {
+        assertFalse(OllamaLlmClient.isRetryableStatus(429));
+        assertFalse(OllamaLlmClient.isRetryableStatus(400));
+        assertFalse(OllamaLlmClient.isRetryableStatus(404));
+        assertFalse(OllamaLlmClient.isRetryableStatus(401));
+    }
+
+    @Test
+    public void test_isRetryableStatus_doesNotRetry502Or200() {
+        assertFalse(OllamaLlmClient.isRetryableStatus(502));
+        assertFalse(OllamaLlmClient.isRetryableStatus(200));
+    }
+
+    @Test
+    public void test_executeWithRetry_returnsImmediatelyOnSuccess() throws Exception {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
+        final String result = localClient.executeWithRetry("test", () -> {
+            callCount.incrementAndGet();
+            return "ok";
+        });
+        assertEquals("ok", result);
+        assertEquals(1, callCount.get());
+    }
+
+    @Test
+    public void test_executeWithRetry_throwsIOExceptionAfterExhaustion() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+            @Override
+            protected int getRetryMaxAttempts() {
+                return 2;
+            }
+
+            @Override
+            protected long getRetryBaseDelayMs() {
+                return 1L; // keep test fast
+            }
+        };
+        final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
+        try {
+            localClient.executeWithRetry("test", () -> {
+                callCount.incrementAndGet();
+                throw new OllamaLlmClient.RetryableHttpException(503, "overloaded");
+            });
+            fail("expected IOException");
+        } catch (final java.io.IOException e) {
+            assertTrue(e.getMessage().contains("503"));
+            assertEquals(2, callCount.get());
+        }
+    }
+
+    @Test
+    public void test_executeWithRetry_succeedsAfterOneFailure() throws Exception {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+            @Override
+            protected int getRetryMaxAttempts() {
+                return 3;
+            }
+
+            @Override
+            protected long getRetryBaseDelayMs() {
+                return 1L;
+            }
+        };
+        final java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger();
+        final String result = localClient.executeWithRetry("test", () -> {
+            if (callCount.incrementAndGet() == 1) {
+                throw new OllamaLlmClient.RetryableHttpException(503, "overloaded");
+            }
+            return "ok";
+        });
+        assertEquals("ok", result);
+        assertEquals(2, callCount.get());
+    }
+
     // --- Testable subclass ---
 
     static class TestableOllamaLlmClient extends OllamaLlmClient {

@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -724,6 +725,123 @@ public class OllamaLlmClient extends AbstractLlmClient {
     @Override
     public int getHistoryAssistantSummaryMaxChars() {
         return getConfigInt("history.assistant.summary.max.chars", 500);
+    }
+
+    /**
+     * Functional interface for the retryable HTTP call body executed by
+     * {@link #executeWithRetry(String, HttpCall)}.
+     *
+     * @param <T> the call result type.
+     */
+    @FunctionalInterface
+    interface HttpCall<T> {
+        T call() throws IOException;
+    }
+
+    /**
+     * Internal signaling exception thrown by the HTTP call body when the response status
+     * code is retryable (per {@link #isRetryableStatus(int)}). Caught by
+     * {@link #executeWithRetry(String, HttpCall)}; never escapes the client.
+     */
+    static final class RetryableHttpException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        final int statusCode;
+        final String reason;
+
+        RetryableHttpException(final int statusCode, final String reason) {
+            super("retryable http error: " + statusCode + " " + reason);
+            this.statusCode = statusCode;
+            this.reason = reason;
+        }
+    }
+
+    /**
+     * Returns whether the given HTTP status code should be retried. Retryable statuses
+     * for Ollama are {@code 500} (transient), {@code 503} (queue overload, the primary
+     * target), and {@code 504} (gateway timeout when behind a reverse proxy). Notably
+     * NOT retried: {@code 429} (Ollama does not emit) and {@code 502}.
+     *
+     * @param statusCode the HTTP status code.
+     * @return {@code true} when the status is retryable.
+     */
+    static boolean isRetryableStatus(final int statusCode) {
+        return statusCode == 500 || statusCode == 503 || statusCode == 504;
+    }
+
+    /**
+     * Maximum total attempts (including the first) for a retryable call.
+     *
+     * @return the value of {@code rag.llm.ollama.retry.max} (default {@code 3}).
+     */
+    protected int getRetryMaxAttempts() {
+        return getConfigInt("retry.max", 3);
+    }
+
+    /**
+     * Base delay in milliseconds for exponential backoff between retries.
+     *
+     * @return the value of {@code rag.llm.ollama.retry.base.delay.ms} (default {@code 2000}).
+     */
+    protected long getRetryBaseDelayMs() {
+        return Long.parseLong(ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + ".retry.base.delay.ms", "2000"));
+    }
+
+    /**
+     * Executes {@code call} with retry on {@link RetryableHttpException} and on transient
+     * connect-time {@link IOException}s. {@link LlmException} (RuntimeException) is NOT
+     * caught here and propagates immediately. Backoff is exponential
+     * ({@code base * 2^(attempt-1)}) with +/-20% jitter via {@link ThreadLocalRandom}.
+     *
+     * <p>Streaming callers wrap only the HTTP {@code execute} + status check; once the
+     * NDJSON body starts flowing, partial-stream errors propagate without retry.
+     *
+     * @param operation log label, e.g. {@code "chat"} or {@code "streamChat"}.
+     * @param call the HTTP call body.
+     * @param <T> the call result type.
+     * @return the call result on success.
+     * @throws IOException if the call throws a non-retryable {@link IOException} or the retry
+     *             budget is exhausted.
+     */
+    <T> T executeWithRetry(final String operation, final HttpCall<T> call) throws IOException {
+        final int maxAttempts = Math.max(1, getRetryMaxAttempts());
+        final long baseDelay = Math.max(0L, getRetryBaseDelayMs());
+        IOException lastIo = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return call.call();
+            } catch (final RetryableHttpException e) {
+                if (attempt == maxAttempts) {
+                    logger.warn("[LLM:OLLAMA] {} retry exhausted. attempts={}, lastStatus={}", operation, attempt, e.statusCode);
+                    throw new IOException("Ollama API retryable error: " + e.statusCode + " " + e.reason, e);
+                }
+                final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+                final long delay = (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter;
+                logger.info("[LLM:OLLAMA] {} retrying. attempt={}/{}, status={}, sleepMs={}", operation, attempt, maxAttempts, e.statusCode,
+                        Math.max(0, delay));
+                try {
+                    Thread.sleep(Math.max(0, delay));
+                } catch (final InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Retry interrupted", ie);
+                }
+            } catch (final IOException e) {
+                if (attempt == maxAttempts) {
+                    lastIo = e;
+                    break;
+                }
+                final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+                final long delay = (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter;
+                logger.info("[LLM:OLLAMA] {} retrying. attempt={}/{}, exception={}, sleepMs={}", operation, attempt, maxAttempts,
+                        e.getClass().getSimpleName(), Math.max(0, delay));
+                try {
+                    Thread.sleep(Math.max(0, delay));
+                } catch (final InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Retry interrupted", ie);
+                }
+            }
+        }
+        throw lastIo;
     }
 
 }
