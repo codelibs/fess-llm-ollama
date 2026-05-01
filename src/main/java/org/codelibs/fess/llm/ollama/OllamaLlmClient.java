@@ -23,12 +23,19 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.core5.http.ContentType;
+import org.apache.hc.core5.util.Timeout;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.apache.logging.log4j.LogManager;
@@ -537,6 +544,63 @@ public class OllamaLlmClient extends AbstractLlmClient {
     @Override
     protected int getTimeout() {
         return getConfigInt("timeout", 60000);
+    }
+
+    /**
+     * Gets the TCP connect timeout in milliseconds. Separate from
+     * {@link #getTimeout()} (response/read timeout) so that local Ollama
+     * deployments can fail fast on connection issues while still allowing
+     * minutes for token generation and first-call model load.
+     *
+     * @return the connect timeout in milliseconds.
+     */
+    protected int getConnectTimeout() {
+        return getConfigInt("connect.timeout", 5000);
+    }
+
+    /**
+     * Overrides {@link AbstractLlmClient#init()} to apply distinct connect and response
+     * timeouts. The base implementation uses a single {@link #getTimeout()} value for
+     * all three of: connection-request, response, and connect.
+     *
+     * <p><b>Drift warning:</b> If {@code AbstractLlmClient.init()} adds new HTTP-client
+     * configuration (e.g. an interceptor or new connection-pool setting), this override
+     * must be updated to match. Source of truth: {@code repos/fess/.../AbstractLlmClient.java}.
+     */
+    @Override
+    public void init() {
+        if (!getName().equals(getLlmType())) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Skipping availability check. llmType={}, name={}", getLlmType(), getName());
+            }
+            return;
+        }
+
+        final int connectTimeout = getConnectTimeout();
+        final int responseTimeout = getTimeout();
+        final RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectionRequestTimeout(Timeout.ofMilliseconds(connectTimeout))
+                .setResponseTimeout(Timeout.ofMilliseconds(responseTimeout))
+                .build();
+        final HttpClientBuilder builder = HttpClients.custom()
+                .setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
+                        .setDefaultConnectionConfig(
+                                ConnectionConfig.custom().setConnectTimeout(Timeout.ofMilliseconds(connectTimeout)).build())
+                        .build())
+                .setDefaultRequestConfig(requestConfig)
+                .disableAutomaticRetries();
+        configureProxy(builder);
+        httpClient = builder.build();
+        if (logger.isDebugEnabled()) {
+            logger.debug("[LLM:OLLAMA] Initialized. connectTimeout={}ms, responseTimeout={}ms", connectTimeout, responseTimeout);
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("[LLM] {} initialized. model={}, connectTimeout={}ms, responseTimeout={}ms, maxConcurrent={}", getName(),
+                    getModel(), connectTimeout, responseTimeout, getMaxConcurrentRequests());
+        }
+
+        concurrencyLimiter = new Semaphore(getMaxConcurrentRequests());
+        startAvailabilityCheck();
     }
 
     @Override
