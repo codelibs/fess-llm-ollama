@@ -21,12 +21,23 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.core5.http.ContentType;
+import org.apache.hc.core5.util.Timeout;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.apache.logging.log4j.LogManager;
@@ -56,6 +67,16 @@ public class OllamaLlmClient extends AbstractLlmClient {
     private static final Logger logger = LogManager.getLogger(OllamaLlmClient.class);
     /** The name identifier for the Ollama LLM client. */
     protected static final String NAME = "ollama";
+
+    /** Hard cap on a single backoff sleep, regardless of computed delay. */
+    private static final long MAX_BACKOFF_MS = 60_000L;
+
+    /** done_reason values that indicate a normal stream termination. */
+    private static final Set<String> NORMAL_DONE_REASONS = Set.of("stop", "load", "unload");
+
+    private static final String CONFIG_RETRY_MAX = "retry.max";
+    private static final String CONFIG_RETRY_BASE_DELAY_MS = "retry.base.delay.ms";
+    private static final String CONFIG_CONNECT_TIMEOUT = "connect.timeout";
 
     /**
      * Default constructor.
@@ -155,52 +176,66 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (logger.isDebugEnabled()) {
                 logger.debug("[LLM:OLLAMA] requestBody={}", json);
             }
-            final HttpPost httpRequest = new HttpPost(url);
-            httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+            return executeWithRetry("chat", () -> {
+                final HttpPost httpRequest = new HttpPost(url);
+                httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+                try (var response = getHttpClient().execute(httpRequest)) {
+                    final int statusCode = response.getCode();
+                    if (statusCode < 200 || statusCode >= 300) {
+                        if (isRetryableStatus(statusCode)) {
+                            throw new RetryableHttpException(statusCode, response.getReasonPhrase());
+                        }
+                        logger.warn("[LLM:OLLAMA] API error. url={}, statusCode={}, message={}", url, statusCode,
+                                response.getReasonPhrase());
+                        throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
+                                resolveErrorCode(statusCode));
+                    }
 
-            try (var response = getHttpClient().execute(httpRequest)) {
-                final int statusCode = response.getCode();
-                if (statusCode < 200 || statusCode >= 300) {
-                    logger.warn("[LLM:OLLAMA] API error. url={}, statusCode={}, message={}", url, statusCode, response.getReasonPhrase());
-                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
-                            resolveErrorCode(statusCode));
-                }
+                    String responseBody;
+                    try {
+                        responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
+                    } catch (final org.apache.hc.core5.http.ParseException pe) {
+                        throw new IOException("Failed to parse Ollama response body", pe);
+                    }
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("[LLM:OLLAMA] responseBody={}", responseBody);
+                    }
+                    final JsonNode jsonNode = objectMapper.readTree(responseBody);
 
-                final String responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:OLLAMA] responseBody={}", responseBody);
+                    final LlmChatResponse chatResponse = new LlmChatResponse();
+                    final JsonNode messageNode = jsonNode.path("message");
+                    final String content = messageNode.path("content").asText(null);
+                    if (content != null) {
+                        chatResponse.setContent(content);
+                    }
+                    final String finishReason = jsonNode.path("done_reason").asText(null);
+                    if (finishReason != null) {
+                        chatResponse.setFinishReason(finishReason);
+                    }
+                    final String responseModel = jsonNode.path("model").asText(null);
+                    if (responseModel != null) {
+                        chatResponse.setModel(responseModel);
+                    }
+                    if (jsonNode.has("prompt_eval_count")) {
+                        chatResponse.setPromptTokens(jsonNode.get("prompt_eval_count").asInt());
+                    }
+                    if (jsonNode.has("eval_count")) {
+                        chatResponse.setCompletionTokens(jsonNode.get("eval_count").asInt());
+                    }
+                    if (logger.isDebugEnabled()) {
+                        final JsonNode thinkingNode = messageNode.path("thinking");
+                        if (!thinkingNode.isMissingNode()) {
+                            logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinkingNode.asText().length());
+                        }
+                    }
+                    logger.info(
+                            "[LLM:OLLAMA] Chat response received. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
+                            chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
+                            chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
+                            System.currentTimeMillis() - startTime);
+                    return chatResponse;
                 }
-                final JsonNode jsonNode = objectMapper.readTree(responseBody);
-
-                final LlmChatResponse chatResponse = new LlmChatResponse();
-                if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
-                    chatResponse.setContent(jsonNode.get("message").get("content").asText());
-                }
-                if (jsonNode.has("done_reason")) {
-                    chatResponse.setFinishReason(jsonNode.get("done_reason").asText());
-                }
-                if (jsonNode.has("model")) {
-                    chatResponse.setModel(jsonNode.get("model").asText());
-                }
-                if (jsonNode.has("prompt_eval_count")) {
-                    chatResponse.setPromptTokens(jsonNode.get("prompt_eval_count").asInt());
-                }
-                if (jsonNode.has("eval_count")) {
-                    chatResponse.setCompletionTokens(jsonNode.get("eval_count").asInt());
-                }
-
-                if (logger.isDebugEnabled() && jsonNode.has("message") && jsonNode.get("message").has("thinking")) {
-                    final String thinking = jsonNode.get("message").get("thinking").asText();
-                    logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinking.length());
-                }
-
-                logger.info(
-                        "[LLM:OLLAMA] Chat response received. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
-                        chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
-                        chatResponse.getContent() != null ? chatResponse.getContent().length() : 0, System.currentTimeMillis() - startTime);
-
-                return chatResponse;
-            }
+            });
         } catch (final LlmException e) {
             throw e;
         } catch (final Exception e) {
@@ -225,63 +260,43 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (logger.isDebugEnabled()) {
                 logger.debug("[LLM:OLLAMA] requestBody={}", json);
             }
-            final HttpPost httpRequest = new HttpPost(url);
-            httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
-
-            try (var response = getHttpClient().execute(httpRequest)) {
-                final int statusCode = response.getCode();
-                if (statusCode < 200 || statusCode >= 300) {
-                    logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}", url, statusCode,
-                            response.getReasonPhrase());
-                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
-                            resolveErrorCode(statusCode));
-                }
-
-                if (response.getEntity() == null) {
-                    logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
-                    throw new LlmException("Empty response from Ollama");
-                }
-
-                int chunkCount = 0;
-                long firstChunkTime = 0;
-                try (BufferedReader reader =
-                        new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        if (StringUtil.isBlank(line)) {
-                            continue;
+            executeWithRetry("streamChat", () -> {
+                final HttpPost httpRequest = new HttpPost(url);
+                httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+                try (var response = getHttpClient().execute(httpRequest)) {
+                    final int statusCode = response.getCode();
+                    if (statusCode < 200 || statusCode >= 300) {
+                        if (isRetryableStatus(statusCode)) {
+                            throw new RetryableHttpException(statusCode, response.getReasonPhrase());
                         }
-                        try {
-                            final JsonNode jsonNode = objectMapper.readTree(line);
-                            final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
-
-                            if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
-                                final String content = jsonNode.get("message").get("content").asText();
-                                if (content.isEmpty() && !done && jsonNode.get("message").has("thinking")) {
-                                    // Skip thinking-only chunk
-                                    continue;
-                                }
-                                callback.onChunk(content, done);
-                                if (chunkCount == 0) {
-                                    firstChunkTime = System.currentTimeMillis() - startTime;
-                                }
-                                chunkCount++;
-                            } else if (done) {
-                                callback.onChunk("", true);
-                            }
-
-                            if (done) {
-                                break;
-                            }
-                        } catch (final JsonProcessingException e) {
-                            logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
-                        }
+                        logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}", url, statusCode,
+                                response.getReasonPhrase());
+                        throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
+                                resolveErrorCode(statusCode));
                     }
-                }
 
-                logger.info("[LLM:OLLAMA] Stream completed. chunkCount={}, firstChunkMs={}, elapsedTime={}ms", chunkCount, firstChunkTime,
-                        System.currentTimeMillis() - startTime);
-            }
+                    final var contentTypeHeader = response.getFirstHeader("Content-Type");
+                    final String contentType = contentTypeHeader == null ? "" : contentTypeHeader.getValue();
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("[LLM:OLLAMA] Stream response received. status={}, contentType={}", statusCode,
+                                contentType.isEmpty() ? "<absent>" : contentType);
+                    }
+                    if (!contentType.toLowerCase(Locale.ROOT).startsWith("application/x-ndjson")) {
+                        logger.warn(
+                                "[LLM:OLLAMA] Unexpected Content-Type for streaming response. "
+                                        + "expected=application/x-ndjson, actual='{}'. Likely a misconfigured proxy or version mismatch.",
+                                contentType.isEmpty() ? "<absent>" : contentType);
+                    }
+
+                    if (response.getEntity() == null) {
+                        logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
+                        throw new LlmException("Empty response from Ollama");
+                    }
+
+                    consumeStream((String) requestBody.get("model"), response, callback, startTime);
+                    return null;
+                }
+            });
         } catch (final LlmException e) {
             callback.onError(e);
             throw e;
@@ -290,6 +305,98 @@ public class OllamaLlmClient extends AbstractLlmClient {
             final LlmException llmException = new LlmException("Failed to stream from Ollama API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
+        }
+    }
+
+    /**
+     * Consumes the NDJSON streaming body and emits chunks via {@code callback}.
+     * Caller is responsible for closing {@code response}.
+     *
+     * @param model the model name (used for log context).
+     * @param response the HTTP response holding the NDJSON entity.
+     * @param callback the stream callback to invoke for each chunk.
+     * @param startTime the millisecond timestamp captured before the request, for elapsed-time logs.
+     * @throws IOException if reading the stream fails.
+     */
+    private void consumeStream(final String model, final org.apache.hc.client5.http.impl.classic.CloseableHttpResponse response,
+            final LlmStreamCallback callback, final long startTime) throws IOException {
+        int chunkCount = 0;
+        int objectCount = 0;
+        int parseErrorCount = 0;
+        long firstChunkTime = 0;
+        String doneReason = null;
+        long totalDurationNs = 0L;
+        long loadDurationNs = 0L;
+        long promptEvalDurationNs = 0L;
+        long evalDurationNs = 0L;
+        int promptEvalCount = 0;
+        int evalCount = 0;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (StringUtil.isBlank(line)) {
+                    continue;
+                }
+                try {
+                    final JsonNode jsonNode = objectMapper.readTree(line);
+                    objectCount++;
+
+                    final JsonNode errorNode = jsonNode.path("error");
+                    if (!errorNode.isMissingNode() && !errorNode.isNull()) {
+                        final String errorMessage = errorNode.asText();
+                        logger.warn("[LLM:OLLAMA] Stream error received from Ollama. model={}, error={}", model, errorMessage);
+                        throw new LlmException("Ollama stream error: " + errorMessage, LlmException.ERROR_INVALID_RESPONSE);
+                    }
+
+                    final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
+
+                    final JsonNode messageNode = jsonNode.path("message");
+                    final JsonNode contentNode = messageNode.path("content");
+                    if (!contentNode.isMissingNode()) {
+                        final String content = contentNode.asText();
+                        if (content.isEmpty() && !done && !messageNode.path("thinking").isMissingNode()) {
+                            // Skip thinking-only chunk
+                            continue;
+                        }
+                        callback.onChunk(content, done);
+                        if (chunkCount == 0) {
+                            firstChunkTime = System.currentTimeMillis() - startTime;
+                        }
+                        chunkCount++;
+                    } else if (done) {
+                        callback.onChunk("", true);
+                    }
+
+                    if (done) {
+                        doneReason = jsonNode.path("done_reason").asText(null);
+                        totalDurationNs = jsonNode.path("total_duration").asLong(0L);
+                        loadDurationNs = jsonNode.path("load_duration").asLong(0L);
+                        promptEvalDurationNs = jsonNode.path("prompt_eval_duration").asLong(0L);
+                        evalDurationNs = jsonNode.path("eval_duration").asLong(0L);
+                        promptEvalCount = jsonNode.path("prompt_eval_count").asInt(0);
+                        evalCount = jsonNode.path("eval_count").asInt(0);
+                        break;
+                    }
+                } catch (final JsonProcessingException e) {
+                    parseErrorCount++;
+                    logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
+                }
+            }
+        }
+
+        final long evalDurationMs = evalDurationNs / 1_000_000L;
+        final String tokensPerSecond = evalDurationMs > 0 ? String.format(Locale.ROOT, "%.2f", evalCount * 1000.0 / evalDurationMs) : "n/a";
+        logger.info(
+                "[LLM:OLLAMA] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, "
+                        + "doneReason={}, totalDurationMs={}, loadDurationMs={}, promptEvalDurationMs={}, "
+                        + "evalDurationMs={}, promptEvalCount={}, evalCount={}, tokensPerSecond={}, parseErrorCount={}",
+                chunkCount, objectCount, firstChunkTime, System.currentTimeMillis() - startTime, doneReason, totalDurationNs / 1_000_000L,
+                loadDurationNs / 1_000_000L, promptEvalDurationNs / 1_000_000L, evalDurationMs, promptEvalCount, evalCount, tokensPerSecond,
+                parseErrorCount);
+
+        if (doneReason != null && !NORMAL_DONE_REASONS.contains(doneReason)) {
+            logger.warn("[LLM:OLLAMA] Stream finished abnormally. doneReason={}, evalCount={}, " + "promptEvalCount={}, model={}",
+                    doneReason, evalCount, promptEvalCount, model);
         }
     }
 
@@ -354,12 +461,34 @@ public class OllamaLlmClient extends AbstractLlmClient {
             body.put("options", options);
         }
 
-        final Integer thinkingBudget = request.getThinkingBudget();
-        if (thinkingBudget != null) {
-            body.put("think", thinkingBudget > 0);
+        final String thinkingLevel = request.getExtraParam("thinking_level");
+        if (thinkingLevel != null && isValidThinkingLevel(thinkingLevel)) {
+            body.put("think", thinkingLevel.toLowerCase(Locale.ROOT));
+        } else {
+            final Integer thinkingBudget = request.getThinkingBudget();
+            if (thinkingBudget != null) {
+                body.put("think", thinkingBudget > 0);
+            }
         }
 
         return body;
+    }
+
+    /**
+     * Returns whether the given value is one of the string thinking levels recognized by
+     * Ollama's Chat API ({@code "high"}, {@code "medium"}, {@code "low"}). Required for
+     * GPT-OSS family models which ignore the boolean form of {@code think}.
+     *
+     * @param value the candidate level string (case-insensitive); {@code null} is rejected.
+     * @return {@code true} when the value is a recognized level.
+     * @see <a href="https://docs.ollama.com/capabilities/thinking">Ollama thinking docs</a>
+     */
+    static boolean isValidThinkingLevel(final String value) {
+        if (value == null) {
+            return false;
+        }
+        final String normalized = value.toLowerCase(Locale.ROOT);
+        return "high".equals(normalized) || "medium".equals(normalized) || "low".equals(normalized);
     }
 
     /**
@@ -433,10 +562,45 @@ public class OllamaLlmClient extends AbstractLlmClient {
     /**
      * Gets the Ollama API URL.
      *
-     * @return the API URL
+     * <p>Normalizes the configured value so that callers can append fixed paths like
+     * {@code /api/chat} or {@code /api/tags} without producing duplicates. Trailing
+     * {@code /} and a trailing {@code /api} segment (as documented in
+     * <a href="https://docs.ollama.com/api/introduction">Ollama API introduction</a>:
+     * {@code http://localhost:11434/api}, {@code https://ollama.com/api}) are stripped.
+     *
+     * @return the normalized API base URL (without trailing slash or {@code /api}).
      */
     protected String getApiUrl() {
-        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.api.url", "http://localhost:11434");
+        final String raw = ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.api.url", "http://localhost:11434");
+        return normalizeApiUrl(raw);
+    }
+
+    /**
+     * Strips a trailing {@code /} and a trailing {@code /api} segment from an Ollama base
+     * URL, leaving the host root that the client can suffix with {@code /api/chat} or
+     * {@code /api/tags}. Idempotent.
+     *
+     * @param url the raw configured URL.
+     * @return the normalized URL, or the input unchanged when blank.
+     */
+    static String normalizeApiUrl(final String url) {
+        if (url == null) {
+            return null;
+        }
+        String result = url.trim();
+        if (result.isEmpty()) {
+            return result;
+        }
+        while (result.endsWith("/")) {
+            result = result.substring(0, result.length() - 1);
+        }
+        if (result.endsWith("/api")) {
+            result = result.substring(0, result.length() - 4);
+        }
+        while (result.endsWith("/")) {
+            result = result.substring(0, result.length() - 1);
+        }
+        return result;
     }
 
     @Override
@@ -449,6 +613,78 @@ public class OllamaLlmClient extends AbstractLlmClient {
         return getConfigInt("timeout", 60000);
     }
 
+    /**
+     * Gets the TCP connect timeout in milliseconds. Separate from
+     * {@link #getTimeout()} (response/read timeout) so that local Ollama
+     * deployments can fail fast on connection issues while still allowing
+     * minutes for token generation and first-call model load.
+     *
+     * @return the connect timeout in milliseconds.
+     */
+    protected int getConnectTimeout() {
+        return getConfigInt(CONFIG_CONNECT_TIMEOUT, 5000);
+    }
+
+    /**
+     * Overrides {@link AbstractLlmClient#init()} to apply distinct connect and response
+     * timeouts. The base implementation uses a single {@link #getTimeout()} value for
+     * all three of: connection-request, response, and connect.
+     *
+     * <p><b>Drift warning:</b> If {@code AbstractLlmClient.init()} adds new HTTP-client
+     * configuration (e.g. an interceptor or new connection-pool setting), this override
+     * must be updated to match. Source of truth: {@code repos/fess/.../AbstractLlmClient.java}.
+     */
+    @Override
+    public void init() {
+        if (!getName().equals(getLlmType())) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Skipping availability check. llmType={}, name={}", getLlmType(), getName());
+            }
+            return;
+        }
+
+        if (httpClient != null) {
+            // Defensive: re-init scenarios should release the prior pool before swapping.
+            try {
+                httpClient.close();
+            } catch (final IOException e) {
+                logger.warn("[LLM:OLLAMA] Failed to close prior HTTP client during re-init", e);
+            }
+        }
+        httpClient = buildHttpClient();
+        if (logger.isDebugEnabled()) {
+            logger.debug("[LLM:OLLAMA] {} initialized. model={}, connectTimeout={}ms, responseTimeout={}ms, maxConcurrent={}", getName(),
+                    getModel(), getConnectTimeout(), getTimeout(), getMaxConcurrentRequests());
+        }
+
+        concurrencyLimiter = new Semaphore(getMaxConcurrentRequests());
+        startAvailabilityCheck();
+    }
+
+    /**
+     * Builds the {@link CloseableHttpClient} with two-tier timeouts (connect vs response/read)
+     * and the shared proxy configuration. Used by {@link #init()} and mirrored by tests.
+     *
+     * @return a configured {@link CloseableHttpClient}.
+     */
+    protected CloseableHttpClient buildHttpClient() {
+        final int connectTimeout = getConnectTimeout();
+        final int responseTimeout = getTimeout();
+        final RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectionRequestTimeout(Timeout.ofMilliseconds(connectTimeout))
+                .setResponseTimeout(Timeout.ofMilliseconds(responseTimeout))
+                .build();
+        final HttpClientBuilder builder = HttpClients.custom()
+                .setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create()
+                        .setDefaultConnectionConfig(
+                                ConnectionConfig.custom().setConnectTimeout(Timeout.ofMilliseconds(connectTimeout)).build())
+                        .build())
+                .setDefaultRequestConfig(requestConfig)
+                .disableAutomaticRetries();
+        configureProxy(builder);
+        return builder.build();
+    }
+
     @Override
     protected String getConfigPrefix() {
         return "rag.llm.ollama";
@@ -459,7 +695,6 @@ public class OllamaLlmClient extends AbstractLlmClient {
         super.applyPromptTypeParams(request, promptType);
         final String prefix = getConfigPrefix() + "." + promptType;
         final String defaultPrefix = getConfigPrefix() + ".default";
-        final var config = ComponentUtil.getFessConfig();
 
         final String topP = getConfigWithFallback(prefix + ".top.p", defaultPrefix + ".top.p");
         if (topP != null) {
@@ -475,15 +710,31 @@ public class OllamaLlmClient extends AbstractLlmClient {
         }
 
         if (request.getTemperature() == null) {
-            final String defaultTemp = config.getOrDefault(defaultPrefix + ".temperature", null);
-            if (defaultTemp != null) {
-                request.setTemperature(Double.parseDouble(defaultTemp));
+            final String temperature = getConfigWithFallback(prefix + ".temperature", defaultPrefix + ".temperature");
+            if (temperature != null) {
+                request.setTemperature(Double.parseDouble(temperature));
             }
         }
         if (request.getMaxTokens() == null) {
-            final String defaultMaxTokens = config.getOrDefault(defaultPrefix + ".max.tokens", null);
-            if (defaultMaxTokens != null) {
-                request.setMaxTokens(Integer.parseInt(defaultMaxTokens));
+            final String maxTokens = getConfigWithFallback(prefix + ".max.tokens", defaultPrefix + ".max.tokens");
+            if (maxTokens != null) {
+                request.setMaxTokens(Integer.parseInt(maxTokens));
+            }
+        }
+        if (request.getThinkingBudget() == null) {
+            final String thinkingBudget = getConfigWithFallback(prefix + ".thinking.budget", defaultPrefix + ".thinking.budget");
+            if (thinkingBudget != null) {
+                request.setThinkingBudget(Integer.parseInt(thinkingBudget));
+            }
+        }
+        if (request.getExtraParam("thinking_level") == null) {
+            final String thinkingLevel = getConfigWithFallback(prefix + ".thinking.level", defaultPrefix + ".thinking.level");
+            if (thinkingLevel != null) {
+                if (isValidThinkingLevel(thinkingLevel)) {
+                    request.putExtraParam("thinking_level", thinkingLevel);
+                } else {
+                    logger.warn("[LLM:OLLAMA] Invalid thinking.level value, ignoring. value={}, allowed=[high,medium,low]", thinkingLevel);
+                }
             }
         }
         applyDefaultParams(request, promptType);
@@ -661,6 +912,144 @@ public class OllamaLlmClient extends AbstractLlmClient {
     @Override
     public int getHistoryAssistantSummaryMaxChars() {
         return getConfigInt("history.assistant.summary.max.chars", 500);
+    }
+
+    /**
+     * Functional interface for the retryable HTTP call body executed by
+     * {@link #executeWithRetry(String, HttpCall)}.
+     *
+     * @param <T> the call result type.
+     */
+    @FunctionalInterface
+    interface HttpCall<T> {
+        T call() throws IOException;
+    }
+
+    /**
+     * Internal signaling exception thrown by the HTTP call body when the response status
+     * code is retryable (per {@link #isRetryableStatus(int)}). Caught by
+     * {@link #executeWithRetry(String, HttpCall)}; never escapes the client.
+     */
+    static final class RetryableHttpException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        final int statusCode;
+        final String reason;
+
+        RetryableHttpException(final int statusCode, final String reason) {
+            super("retryable http error: " + statusCode + " " + reason);
+            this.statusCode = statusCode;
+            this.reason = reason;
+        }
+    }
+
+    /**
+     * Returns whether the given HTTP status code should be retried. Retryable statuses
+     * cover Ollama's documented common errors: {@code 429} (Too Many Requests, returned
+     * by Ollama Cloud and rate-limited proxies), {@code 500} (transient internal error),
+     * {@code 502} (Bad Gateway, also documented as a common error), {@code 503} (queue
+     * overload, the primary target for self-hosted), and {@code 504} (gateway timeout
+     * when behind a reverse proxy).
+     *
+     * @param statusCode the HTTP status code.
+     * @return {@code true} when the status is retryable.
+     * @see <a href="https://docs.ollama.com/api/errors">Ollama errors</a>
+     */
+    static boolean isRetryableStatus(final int statusCode) {
+        return statusCode == 429 || statusCode == 500 || statusCode == 502 || statusCode == 503 || statusCode == 504;
+    }
+
+    /**
+     * Maximum total attempts (including the first) for a retryable call.
+     *
+     * @return the value of {@code rag.llm.ollama.retry.max} (default {@code 3}).
+     */
+    protected int getRetryMaxAttempts() {
+        return getConfigInt(CONFIG_RETRY_MAX, 3);
+    }
+
+    /**
+     * Base delay in milliseconds for exponential backoff between retries.
+     *
+     * @return the value of {@code rag.llm.ollama.retry.base.delay.ms} (default {@code 2000}).
+     */
+    protected long getRetryBaseDelayMs() {
+        final String raw = ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + "." + CONFIG_RETRY_BASE_DELAY_MS, "2000");
+        try {
+            return Long.parseLong(raw);
+        } catch (final NumberFormatException e) {
+            logger.warn("[LLM:OLLAMA] Invalid {}.{}='{}', using default 2000ms", getConfigPrefix(), CONFIG_RETRY_BASE_DELAY_MS, raw);
+            return 2000L;
+        }
+    }
+
+    /**
+     * Executes {@code call} with retry on {@link RetryableHttpException} and on transient
+     * connect-time {@link IOException}s. {@link LlmException} (RuntimeException) is NOT
+     * caught here and propagates immediately. Backoff is exponential
+     * ({@code base * 2^(attempt-1)}) with +/-20% jitter via {@link ThreadLocalRandom}.
+     *
+     * <p>Streaming callers wrap only the HTTP {@code execute} + status check; once the
+     * NDJSON body starts flowing, partial-stream errors propagate without retry.
+     *
+     * @param operation log label, e.g. {@code "chat"} or {@code "streamChat"}.
+     * @param call the HTTP call body.
+     * @param <T> the call result type.
+     * @return the call result on success.
+     * @throws IOException if the call throws a non-retryable {@link IOException} or the retry
+     *             budget is exhausted.
+     */
+    <T> T executeWithRetry(final String operation, final HttpCall<T> call) throws IOException {
+        final int maxAttempts = Math.max(1, getRetryMaxAttempts());
+        final long baseDelay = Math.max(0L, getRetryBaseDelayMs());
+        IOException lastIo = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return call.call();
+            } catch (final RetryableHttpException e) {
+                if (attempt == maxAttempts) {
+                    logger.warn("[LLM:OLLAMA] {} retry exhausted. attempts={}, lastStatus={}", operation, attempt, e.statusCode);
+                    throw new IOException("Ollama API retryable error: " + e.statusCode + " " + e.reason, e);
+                }
+                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "status", e.statusCode);
+            } catch (final IOException e) {
+                if (attempt == maxAttempts) {
+                    lastIo = e;
+                    break;
+                }
+                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "exception", e.getClass().getSimpleName());
+            }
+        }
+        if (lastIo == null) {
+            throw new IllegalStateException("executeWithRetry exited without exception or success");
+        }
+        throw lastIo;
+    }
+
+    /**
+     * Sleeps an exponential-backoff interval with +/-20% jitter and a hard cap.
+     * Logs the retry decision at INFO. Restores interrupt status if interrupted.
+     *
+     * @param operation log label.
+     * @param attempt 1-based current attempt index.
+     * @param maxAttempts total attempts including the first.
+     * @param baseDelay base delay in milliseconds (already clamped to >=0).
+     * @param logFieldKey log field name carrying the cause ("status" or "exception").
+     * @param logFieldValue log field value for the cause.
+     * @throws IOException if the sleep is interrupted.
+     */
+    private void sleepBackoff(final String operation, final int attempt, final int maxAttempts, final long baseDelay,
+            final String logFieldKey, final Object logFieldValue) throws IOException {
+        final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+        final long delay = Math.min(MAX_BACKOFF_MS, (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter);
+        final long sleepMs = Math.max(0, delay);
+        logger.info("[LLM:OLLAMA] {} retrying. attempt={}/{}, {}={}, sleepMs={}", operation, attempt, maxAttempts, logFieldKey,
+                logFieldValue, sleepMs);
+        try {
+            Thread.sleep(sleepMs);
+        } catch (final InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Retry interrupted", ie);
+        }
     }
 
 }
