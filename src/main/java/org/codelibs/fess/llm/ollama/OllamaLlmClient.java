@@ -21,6 +21,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -243,10 +244,10 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     logger.debug("[LLM:OLLAMA] Stream response received. status={}, contentType={}", statusCode,
                             contentType.isEmpty() ? "<absent>" : contentType);
                 }
-                if (!contentType.startsWith("application/x-ndjson")) {
+                if (!contentType.toLowerCase(Locale.ROOT).startsWith("application/x-ndjson")) {
                     logger.warn(
                             "[LLM:OLLAMA] Unexpected Content-Type for streaming response. "
-                                    + "expected=application/x-ndjson, actual={}. Likely a misconfigured proxy or version mismatch.",
+                                    + "expected=application/x-ndjson, actual='{}'. Likely a misconfigured proxy or version mismatch.",
                             contentType.isEmpty() ? "<absent>" : contentType);
                 }
 

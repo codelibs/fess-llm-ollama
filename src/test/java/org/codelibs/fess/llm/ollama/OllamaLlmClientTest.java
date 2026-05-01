@@ -18,6 +18,8 @@ package org.codelibs.fess.llm.ollama;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.apache.hc.client5.http.config.ConnectionConfig;
 import org.apache.hc.client5.http.config.RequestConfig;
@@ -26,6 +28,12 @@ import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.core5.util.Timeout;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.codelibs.fess.llm.LlmChatRequest;
 import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
@@ -557,7 +565,7 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             try {
                 final LlmChatRequest request = new LlmChatRequest();
                 request.setMessages(List.of(new LlmMessage("user", "hi")));
-                final java.util.List<String> chunks = new java.util.ArrayList<>();
+                final List<String> chunks = new ArrayList<>();
                 localClient.streamChat(request, (content, done) -> chunks.add(content));
                 assertTrue(capture.warnings().stream().anyMatch(m -> m.contains("Unexpected Content-Type") && m.contains("text/plain")));
                 assertEquals(List.of("hi", ""), chunks);
@@ -1197,18 +1205,24 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         }
     }
 
-    static final class LogCapturingAppender extends org.apache.logging.log4j.core.appender.AbstractAppender {
-        private final java.util.List<org.apache.logging.log4j.core.LogEvent> events = new java.util.concurrent.CopyOnWriteArrayList<>();
-        private final org.apache.logging.log4j.core.Logger boundLogger;
+    /**
+     * Test helper that captures Log4j2 events emitted by a target class so tests can
+     * assert on log output. Attach via {@link #attach(Class)}, query via
+     * {@link #messagesAt(org.apache.logging.log4j.Level)} or convenience methods, and
+     * always {@link #detach()} in a finally block. Not safe for parallel test
+     * execution — capture is on the global Log4j2 logger registry.
+     */
+    static final class LogCapturingAppender extends AbstractAppender {
+        private final List<LogEvent> events = new CopyOnWriteArrayList<>();
+        private final Logger boundLogger;
 
-        private LogCapturingAppender(final org.apache.logging.log4j.core.Logger logger) {
-            super("LogCapturingAppender-" + System.nanoTime(), null, null, true, org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY);
+        private LogCapturingAppender(final Logger logger) {
+            super("LogCapturingAppender-" + UUID.randomUUID(), null, null, true, Property.EMPTY_ARRAY);
             this.boundLogger = logger;
         }
 
         static LogCapturingAppender attach(final Class<?> targetClass) {
-            final org.apache.logging.log4j.core.Logger logger =
-                    (org.apache.logging.log4j.core.Logger) org.apache.logging.log4j.LogManager.getLogger(targetClass);
+            final Logger logger = (Logger) LogManager.getLogger(targetClass);
             final LogCapturingAppender appender = new LogCapturingAppender(logger);
             appender.start();
             logger.addAppender(appender);
@@ -1221,22 +1235,28 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         }
 
         @Override
-        public void append(final org.apache.logging.log4j.core.LogEvent event) {
+        public void append(final LogEvent event) {
             events.add(event.toImmutable());
         }
 
-        java.util.List<String> warnings() {
-            return events.stream()
-                    .filter(e -> e.getLevel() == org.apache.logging.log4j.Level.WARN)
-                    .map(e -> e.getMessage().getFormattedMessage())
-                    .collect(java.util.stream.Collectors.toList());
+        List<String> messagesAt(final Level level) {
+            return events.stream().filter(e -> e.getLevel() == level).map(e -> e.getMessage().getFormattedMessage()).toList();
         }
 
-        java.util.List<String> infos() {
-            return events.stream()
-                    .filter(e -> e.getLevel() == org.apache.logging.log4j.Level.INFO)
-                    .map(e -> e.getMessage().getFormattedMessage())
-                    .collect(java.util.stream.Collectors.toList());
+        List<String> warnings() {
+            return messagesAt(Level.WARN);
+        }
+
+        List<String> infos() {
+            return messagesAt(Level.INFO);
+        }
+
+        List<String> errors() {
+            return messagesAt(Level.ERROR);
+        }
+
+        List<String> debugs() {
+            return messagesAt(Level.DEBUG);
         }
     }
 }
