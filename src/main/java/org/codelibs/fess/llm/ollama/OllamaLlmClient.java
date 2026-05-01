@@ -237,6 +237,19 @@ public class OllamaLlmClient extends AbstractLlmClient {
                             resolveErrorCode(statusCode));
                 }
 
+                final var contentTypeHeader = response.getFirstHeader("Content-Type");
+                final String contentType = contentTypeHeader == null ? "" : contentTypeHeader.getValue();
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[LLM:OLLAMA] Stream response received. status={}, contentType={}", statusCode,
+                            contentType.isEmpty() ? "<absent>" : contentType);
+                }
+                if (!contentType.startsWith("application/x-ndjson")) {
+                    logger.warn(
+                            "[LLM:OLLAMA] Unexpected Content-Type for streaming response. "
+                                    + "expected=application/x-ndjson, actual={}. Likely a misconfigured proxy or version mismatch.",
+                            contentType.isEmpty() ? "<absent>" : contentType);
+                }
+
                 if (response.getEntity() == null) {
                     logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
                     throw new LlmException("Empty response from Ollama");

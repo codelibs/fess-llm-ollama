@@ -542,6 +542,60 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_unexpectedContentTypeEmitsWarn() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        final String body = "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
+                + "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "text/plain").setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                final LlmChatRequest request = new LlmChatRequest();
+                request.setMessages(List.of(new LlmMessage("user", "hi")));
+                final java.util.List<String> chunks = new java.util.ArrayList<>();
+                localClient.streamChat(request, (content, done) -> chunks.add(content));
+                assertTrue(capture.warnings().stream().anyMatch(m -> m.contains("Unexpected Content-Type") && m.contains("text/plain")));
+                assertEquals(List.of("hi", ""), chunks);
+            } finally {
+                capture.detach();
+            }
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_correctContentTypeNoWarn() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        final String body = "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
+                + "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                final LlmChatRequest request = new LlmChatRequest();
+                request.setMessages(List.of(new LlmMessage("user", "hi")));
+                localClient.streamChat(request, (content, done) -> {});
+                assertTrue("Should not warn for correct content type",
+                        capture.warnings().stream().noneMatch(m -> m.contains("Unexpected Content-Type")));
+            } finally {
+                capture.detach();
+            }
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
     public void test_checkAvailabilityNow_success() throws Exception {
         final MockWebServer server = new MockWebServer();
         try {
@@ -1140,6 +1194,49 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
                     .disableAutomaticRetries();
             configureProxy(builder);
             httpClient = builder.build();
+        }
+    }
+
+    static final class LogCapturingAppender extends org.apache.logging.log4j.core.appender.AbstractAppender {
+        private final java.util.List<org.apache.logging.log4j.core.LogEvent> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private final org.apache.logging.log4j.core.Logger boundLogger;
+
+        private LogCapturingAppender(final org.apache.logging.log4j.core.Logger logger) {
+            super("LogCapturingAppender-" + System.nanoTime(), null, null, true, org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY);
+            this.boundLogger = logger;
+        }
+
+        static LogCapturingAppender attach(final Class<?> targetClass) {
+            final org.apache.logging.log4j.core.Logger logger =
+                    (org.apache.logging.log4j.core.Logger) org.apache.logging.log4j.LogManager.getLogger(targetClass);
+            final LogCapturingAppender appender = new LogCapturingAppender(logger);
+            appender.start();
+            logger.addAppender(appender);
+            return appender;
+        }
+
+        void detach() {
+            boundLogger.removeAppender(this);
+            stop();
+        }
+
+        @Override
+        public void append(final org.apache.logging.log4j.core.LogEvent event) {
+            events.add(event.toImmutable());
+        }
+
+        java.util.List<String> warnings() {
+            return events.stream()
+                    .filter(e -> e.getLevel() == org.apache.logging.log4j.Level.WARN)
+                    .map(e -> e.getMessage().getFormattedMessage())
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
+        java.util.List<String> infos() {
+            return events.stream()
+                    .filter(e -> e.getLevel() == org.apache.logging.log4j.Level.INFO)
+                    .map(e -> e.getMessage().getFormattedMessage())
+                    .collect(java.util.stream.Collectors.toList());
         }
     }
 }
