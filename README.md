@@ -32,13 +32,19 @@ Configure the following properties in `fess_config.properties`:
 | `rag.llm.name` | - | Set to `ollama` to use this plugin |
 | `rag.chat.enabled` | `false` | Enable RAG chat feature |
 | `rag.llm.ollama.api.url` | `http://localhost:11434` | Ollama API endpoint URL |
-| `rag.llm.ollama.model` | `gemma4:e4b` | Model name (e.g., `llama3:latest`, `mistral`) |
-| `rag.llm.ollama.timeout` | `60000` | HTTP request timeout in milliseconds |
-| `rag.llm.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability |
 | `rag.llm.ollama.answer.context.max.chars` | `10000` | Maximum characters for document context in answer generation |
-| `rag.llm.ollama.summary.context.max.chars` | `10000` | Maximum characters for document context in summary generation |
-| `rag.llm.ollama.faq.context.max.chars` | `6000` | Maximum characters for document context in FAQ generation |
+| `rag.llm.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability |
 | `rag.llm.ollama.chat.evaluation.max.relevant.docs` | `3` | Maximum number of relevant documents for evaluation |
+| `rag.llm.ollama.connect.timeout` | `5000` | TCP connect timeout (ms). Separate from `timeout` (read/response). |
+| `rag.llm.ollama.default.max.tokens` | (unset) | Fallback when `<type>.max.tokens` is not set. |
+| `rag.llm.ollama.default.temperature` | (unset) | Fallback when `<type>.temperature` is not set. |
+| `rag.llm.ollama.default.thinking.budget` | (unset) | Fallback when `<type>.thinking.budget` is not set. |
+| `rag.llm.ollama.faq.context.max.chars` | `6000` | Maximum characters for document context in FAQ generation |
+| `rag.llm.ollama.model` | `gemma4:e4b` | Model name (e.g., `llama3:latest`, `mistral`) |
+| `rag.llm.ollama.retry.base.delay.ms` | `2000` | Base delay (ms) for exponential backoff with ±20% jitter. |
+| `rag.llm.ollama.retry.max` | `3` | Maximum total attempts on retryable HTTP errors (500/503/504) and connect-time IOExceptions. |
+| `rag.llm.ollama.summary.context.max.chars` | `10000` | Maximum characters for document context in summary generation |
+| `rag.llm.ollama.timeout` | `60000` | Response/read timeout (ms). For TCP connect timeout see `rag.llm.ollama.connect.timeout`. |
 
 ### Recommended num_ctx Setting
 
@@ -57,7 +63,41 @@ You can configure `top_p` and `top_k` sampling parameters for each prompt type:
 | `rag.llm.ollama.<promptType>.top.p` | Top-p (nucleus) sampling parameter |
 | `rag.llm.ollama.<promptType>.top.k` | Top-k sampling parameter |
 
-### Reasoning Model Configuration (e.g., qwen3.5)
+## Retry behavior
+
+Both `chat()` and `streamChat()` retry on:
+
+- HTTP `500`, `503` (Ollama queue overload via `OLLAMA_MAX_QUEUE`), `504`
+- `IOException` raised before a response is received (DNS, TCP, TLS, idle-socket failures)
+
+`429` is **not** retried — Ollama does not return 429. `4xx` errors are surfaced as
+`LlmException` immediately.
+
+Streaming retries only the initial HTTP request. Once NDJSON bytes start flowing,
+in-stream errors propagate immediately (no replay).
+
+Defaults can be overridden via `rag.llm.ollama.retry.max` and
+`rag.llm.ollama.retry.base.delay.ms`.
+
+## Stream completion log
+
+A single INFO line is emitted per `streamChat()` call:
+
+```
+[LLM:OLLAMA] Stream completed. chunkCount=N, objectCount=N, firstChunkMs=N,
+  elapsedTime=Nms, doneReason=stop, totalDurationMs=N, loadDurationMs=N,
+  promptEvalDurationMs=N, evalDurationMs=N, promptEvalCount=N, evalCount=N,
+  tokensPerSecond=N.NN, parseErrorCount=0
+```
+
+A sibling WARN line is emitted when `done_reason` is anything other than `stop`,
+`load`, or `unload` — most commonly `length` (context window truncation):
+
+```
+[LLM:OLLAMA] Stream finished abnormally. doneReason=length, evalCount=N, ...
+```
+
+## Reasoning Model Configuration (e.g., qwen3.5)
 
 Reasoning models like `qwen3.5` use internal thinking tokens that improve answer quality
 but consume output tokens. Configure thinking per prompt type for optimal results.
