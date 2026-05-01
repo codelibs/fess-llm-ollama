@@ -35,6 +35,55 @@ Code formatting is enforced by `formatter-maven-plugin` and license headers by `
 - Per-prompt-type config supports fallback to `rag.llm.ollama.default.*` keys.
 - HTTP via Apache HttpClient 5. Streaming uses NDJSON line-by-line parsing.
 
+### Logging keys
+
+`streamChat` emits one `[LLM:OLLAMA] Stream completed.` INFO line per call carrying:
+`chunkCount`, `objectCount`, `firstChunkMs`, `elapsedTime`, `doneReason`,
+`totalDurationMs`, `loadDurationMs`, `promptEvalDurationMs`, `evalDurationMs`,
+`promptEvalCount`, `evalCount`, `tokensPerSecond`, `parseErrorCount`.
+
+When `done_reason` is anything other than `stop`/`load`/`unload`, both `chat()`
+and `streamChat()` emit an extra WARN line so context truncation (`length`) and
+future abnormal reasons can be alerted on without enabling DEBUG.
+
+Enable `org.codelibs.fess.llm.ollama` at DEBUG to additionally log:
+- the JSON request body (`requestBody=`),
+- HTTP status + `Content-Type` of the streaming response,
+- the `thinking` field length when reasoning models emit one.
+
+### Retries and timeouts
+
+Retries: HTTP `500`, `503`, `504` and connect-time `IOException` are retried up
+to `rag.llm.ollama.retry.max` times (default `3`) with exponential backoff
+starting at `rag.llm.ollama.retry.base.delay.ms` (default `2000`) and ±20%
+jitter. `429` is NOT retried (Ollama does not emit it); `4xx` is treated as a
+configuration error. Streaming retries only the initial connect — once the
+NDJSON body starts flowing, partial-stream errors propagate immediately.
+
+Timeouts are two-tier:
+- `rag.llm.ollama.connect.timeout` (default `5000`) — TCP connect, connection-request acquisition.
+- `rag.llm.ollama.timeout` (default `60000`) — response/read timeout.
+
+The override of `init()` mirrors `AbstractLlmClient.init()` from `repos/fess`.
+If the base class adds new HTTP-client configuration (interceptors, pool
+settings), update the override to match.
+
+### Per-prompt-type config keys
+
+Each prompt type (`intent`, `evaluation`, `unclear`, `noresults`, `docnotfound`,
+`direct`, `faq`, `answer`, `summary`, `queryregeneration`) supports the
+following per-type overrides via `fess_config.properties`:
+
+- `rag.llm.ollama.<type>.thinking.budget`
+- `rag.llm.ollama.<type>.max.tokens`
+- `rag.llm.ollama.<type>.temperature`
+- `rag.llm.ollama.<type>.top.p`, `.top.k`, `.num.ctx`
+- `rag.llm.ollama.<type>.context.max.chars`
+
+Resolution order: `<type>.<param>` → `default.<param>` → hardcoded type default
+(in `applyDefaultParams`) → unset. Explicit user values on the request always win
+over computed defaults.
+
 ## Testing
 
 Tests use `UnitFessTestCase` (extends utflute's `WebContainerTestCase`) with `test_app.xml` container config. HTTP interactions are tested with OkHttp `MockWebServer`. The `TestableOllamaLlmClient` inner class overrides config methods to avoid `ComponentUtil` dependency in tests.
