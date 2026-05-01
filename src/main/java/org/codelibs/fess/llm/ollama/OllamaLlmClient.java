@@ -459,7 +459,6 @@ public class OllamaLlmClient extends AbstractLlmClient {
         super.applyPromptTypeParams(request, promptType);
         final String prefix = getConfigPrefix() + "." + promptType;
         final String defaultPrefix = getConfigPrefix() + ".default";
-        final var config = ComponentUtil.getFessConfig();
 
         final String topP = getConfigWithFallback(prefix + ".top.p", defaultPrefix + ".top.p");
         if (topP != null) {
@@ -475,15 +474,21 @@ public class OllamaLlmClient extends AbstractLlmClient {
         }
 
         if (request.getTemperature() == null) {
-            final String defaultTemp = config.getOrDefault(defaultPrefix + ".temperature", null);
-            if (defaultTemp != null) {
-                request.setTemperature(Double.parseDouble(defaultTemp));
+            final String temperature = getConfigWithFallback(prefix + ".temperature", defaultPrefix + ".temperature");
+            if (temperature != null) {
+                request.setTemperature(Double.parseDouble(temperature));
             }
         }
         if (request.getMaxTokens() == null) {
-            final String defaultMaxTokens = config.getOrDefault(defaultPrefix + ".max.tokens", null);
-            if (defaultMaxTokens != null) {
-                request.setMaxTokens(Integer.parseInt(defaultMaxTokens));
+            final String maxTokens = getConfigWithFallback(prefix + ".max.tokens", defaultPrefix + ".max.tokens");
+            if (maxTokens != null) {
+                request.setMaxTokens(Integer.parseInt(maxTokens));
+            }
+        }
+        if (request.getThinkingBudget() == null) {
+            final String thinkingBudget = getConfigWithFallback(prefix + ".thinking.budget", defaultPrefix + ".thinking.budget");
+            if (thinkingBudget != null) {
+                request.setThinkingBudget(Integer.parseInt(thinkingBudget));
             }
         }
         applyDefaultParams(request, promptType);

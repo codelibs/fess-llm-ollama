@@ -811,6 +811,58 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         assertNull(request.getThinkingBudget());
     }
 
+    // --- applyPromptTypeParams config-key tests ---
+
+    @Test
+    public void test_applyPromptTypeParams_thinkingBudgetFromConfig() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+            @Override
+            protected String getConfigWithFallback(final String primaryKey, final String fallbackKey) {
+                if ((getConfigPrefix() + ".answer.thinking.budget").equals(primaryKey)) {
+                    return "4096";
+                }
+                return null;
+            }
+        };
+        final LlmChatRequest request = new LlmChatRequest();
+        request.setMessages(java.util.List.of(new LlmMessage("user", "hello")));
+        localClient.applyPromptTypeParams(request, "answer");
+        assertEquals(Integer.valueOf(4096), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyPromptTypeParams_thinkingBudgetHardcodedFallbackForIntent() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+            @Override
+            protected String getConfigWithFallback(final String primaryKey, final String fallbackKey) {
+                return null; // no config set
+            }
+        };
+        final LlmChatRequest request = new LlmChatRequest();
+        request.setMessages(java.util.List.of(new LlmMessage("user", "hello")));
+        localClient.applyPromptTypeParams(request, "intent");
+        // intent hardcodes thinkingBudget=0 in applyDefaultParams (line 508-510)
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyPromptTypeParams_thinkingBudgetFromDefaultFallback() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+            @Override
+            protected String getConfigWithFallback(final String primaryKey, final String fallbackKey) {
+                // No per-type key, but default.thinking.budget is set
+                if ((getConfigPrefix() + ".default.thinking.budget").equals(fallbackKey)) {
+                    return "2048";
+                }
+                return null;
+            }
+        };
+        final LlmChatRequest request = new LlmChatRequest();
+        request.setMessages(java.util.List.of(new LlmMessage("user", "hello")));
+        localClient.applyPromptTypeParams(request, "answer");
+        assertEquals(Integer.valueOf(2048), request.getThinkingBudget());
+    }
+
     // --- gemma3 compatibility tests (non-reasoning model) ---
 
     @Test
