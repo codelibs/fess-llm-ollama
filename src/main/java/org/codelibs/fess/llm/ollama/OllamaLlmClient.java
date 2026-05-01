@@ -160,52 +160,60 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (logger.isDebugEnabled()) {
                 logger.debug("[LLM:OLLAMA] requestBody={}", json);
             }
-            final HttpPost httpRequest = new HttpPost(url);
-            httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+            return executeWithRetry("chat", () -> {
+                final HttpPost httpRequest = new HttpPost(url);
+                httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+                try (var response = getHttpClient().execute(httpRequest)) {
+                    final int statusCode = response.getCode();
+                    if (statusCode < 200 || statusCode >= 300) {
+                        if (isRetryableStatus(statusCode)) {
+                            throw new RetryableHttpException(statusCode, response.getReasonPhrase());
+                        }
+                        logger.warn("[LLM:OLLAMA] API error. url={}, statusCode={}, message={}", url, statusCode,
+                                response.getReasonPhrase());
+                        throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
+                                resolveErrorCode(statusCode));
+                    }
 
-            try (var response = getHttpClient().execute(httpRequest)) {
-                final int statusCode = response.getCode();
-                if (statusCode < 200 || statusCode >= 300) {
-                    logger.warn("[LLM:OLLAMA] API error. url={}, statusCode={}, message={}", url, statusCode, response.getReasonPhrase());
-                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
-                            resolveErrorCode(statusCode));
-                }
+                    String responseBody;
+                    try {
+                        responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
+                    } catch (final org.apache.hc.core5.http.ParseException pe) {
+                        throw new IOException("Failed to parse Ollama response body", pe);
+                    }
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("[LLM:OLLAMA] responseBody={}", responseBody);
+                    }
+                    final JsonNode jsonNode = objectMapper.readTree(responseBody);
 
-                final String responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:OLLAMA] responseBody={}", responseBody);
+                    final LlmChatResponse chatResponse = new LlmChatResponse();
+                    if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
+                        chatResponse.setContent(jsonNode.get("message").get("content").asText());
+                    }
+                    if (jsonNode.has("done_reason")) {
+                        chatResponse.setFinishReason(jsonNode.get("done_reason").asText());
+                    }
+                    if (jsonNode.has("model")) {
+                        chatResponse.setModel(jsonNode.get("model").asText());
+                    }
+                    if (jsonNode.has("prompt_eval_count")) {
+                        chatResponse.setPromptTokens(jsonNode.get("prompt_eval_count").asInt());
+                    }
+                    if (jsonNode.has("eval_count")) {
+                        chatResponse.setCompletionTokens(jsonNode.get("eval_count").asInt());
+                    }
+                    if (logger.isDebugEnabled() && jsonNode.has("message") && jsonNode.get("message").has("thinking")) {
+                        final String thinking = jsonNode.get("message").get("thinking").asText();
+                        logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinking.length());
+                    }
+                    logger.info(
+                            "[LLM:OLLAMA] Chat response received. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
+                            chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
+                            chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
+                            System.currentTimeMillis() - startTime);
+                    return chatResponse;
                 }
-                final JsonNode jsonNode = objectMapper.readTree(responseBody);
-
-                final LlmChatResponse chatResponse = new LlmChatResponse();
-                if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
-                    chatResponse.setContent(jsonNode.get("message").get("content").asText());
-                }
-                if (jsonNode.has("done_reason")) {
-                    chatResponse.setFinishReason(jsonNode.get("done_reason").asText());
-                }
-                if (jsonNode.has("model")) {
-                    chatResponse.setModel(jsonNode.get("model").asText());
-                }
-                if (jsonNode.has("prompt_eval_count")) {
-                    chatResponse.setPromptTokens(jsonNode.get("prompt_eval_count").asInt());
-                }
-                if (jsonNode.has("eval_count")) {
-                    chatResponse.setCompletionTokens(jsonNode.get("eval_count").asInt());
-                }
-
-                if (logger.isDebugEnabled() && jsonNode.has("message") && jsonNode.get("message").has("thinking")) {
-                    final String thinking = jsonNode.get("message").get("thinking").asText();
-                    logger.debug("[LLM:OLLAMA] Thinking response received. thinkingLength={}", thinking.length());
-                }
-
-                logger.info(
-                        "[LLM:OLLAMA] Chat response received. model={}, promptTokens={}, completionTokens={}, contentLength={}, elapsedTime={}ms",
-                        chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
-                        chatResponse.getContent() != null ? chatResponse.getContent().length() : 0, System.currentTimeMillis() - startTime);
-
-                return chatResponse;
-            }
+            });
         } catch (final LlmException e) {
             throw e;
         } catch (final Exception e) {
@@ -230,120 +238,54 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (logger.isDebugEnabled()) {
                 logger.debug("[LLM:OLLAMA] requestBody={}", json);
             }
-            final HttpPost httpRequest = new HttpPost(url);
-            httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
-
-            try (var response = getHttpClient().execute(httpRequest)) {
-                final int statusCode = response.getCode();
-                if (statusCode < 200 || statusCode >= 300) {
-                    logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}", url, statusCode,
-                            response.getReasonPhrase());
-                    throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
-                            resolveErrorCode(statusCode));
-                }
-
-                final var contentTypeHeader = response.getFirstHeader("Content-Type");
-                final String contentType = contentTypeHeader == null ? "" : contentTypeHeader.getValue();
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:OLLAMA] Stream response received. status={}, contentType={}", statusCode,
-                            contentType.isEmpty() ? "<absent>" : contentType);
-                }
-                if (!contentType.toLowerCase(Locale.ROOT).startsWith("application/x-ndjson")) {
-                    logger.warn(
-                            "[LLM:OLLAMA] Unexpected Content-Type for streaming response. "
-                                    + "expected=application/x-ndjson, actual='{}'. Likely a misconfigured proxy or version mismatch.",
-                            contentType.isEmpty() ? "<absent>" : contentType);
-                }
-
-                if (response.getEntity() == null) {
-                    logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
-                    throw new LlmException("Empty response from Ollama");
-                }
-
-                int chunkCount = 0;
-                int objectCount = 0;
-                int parseErrorCount = 0;
-                long firstChunkTime = 0;
-                String doneReason = null;
-                long totalDurationNs = 0L;
-                long loadDurationNs = 0L;
-                long promptEvalDurationNs = 0L;
-                long evalDurationNs = 0L;
-                int promptEvalCount = 0;
-                int evalCount = 0;
-                try (BufferedReader reader =
-                        new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        if (StringUtil.isBlank(line)) {
-                            continue;
+            executeWithRetry("streamChat", () -> {
+                final HttpPost httpRequest = new HttpPost(url);
+                httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+                final var response = getHttpClient().execute(httpRequest);
+                try {
+                    final int statusCode = response.getCode();
+                    if (statusCode < 200 || statusCode >= 300) {
+                        if (isRetryableStatus(statusCode)) {
+                            response.close();
+                            throw new RetryableHttpException(statusCode, response.getReasonPhrase());
                         }
-                        try {
-                            final JsonNode jsonNode = objectMapper.readTree(line);
-                            objectCount++;
-                            final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
-
-                            if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
-                                final String content = jsonNode.get("message").get("content").asText();
-                                if (content.isEmpty() && !done && jsonNode.get("message").has("thinking")) {
-                                    // Skip thinking-only chunk
-                                    continue;
-                                }
-                                callback.onChunk(content, done);
-                                if (chunkCount == 0) {
-                                    firstChunkTime = System.currentTimeMillis() - startTime;
-                                }
-                                chunkCount++;
-                            } else if (done) {
-                                callback.onChunk("", true);
-                            }
-
-                            if (done) {
-                                if (jsonNode.has("done_reason")) {
-                                    doneReason = jsonNode.get("done_reason").asText();
-                                }
-                                if (jsonNode.has("total_duration")) {
-                                    totalDurationNs = jsonNode.get("total_duration").asLong();
-                                }
-                                if (jsonNode.has("load_duration")) {
-                                    loadDurationNs = jsonNode.get("load_duration").asLong();
-                                }
-                                if (jsonNode.has("prompt_eval_duration")) {
-                                    promptEvalDurationNs = jsonNode.get("prompt_eval_duration").asLong();
-                                }
-                                if (jsonNode.has("eval_duration")) {
-                                    evalDurationNs = jsonNode.get("eval_duration").asLong();
-                                }
-                                if (jsonNode.has("prompt_eval_count")) {
-                                    promptEvalCount = jsonNode.get("prompt_eval_count").asInt();
-                                }
-                                if (jsonNode.has("eval_count")) {
-                                    evalCount = jsonNode.get("eval_count").asInt();
-                                }
-                                break;
-                            }
-                        } catch (final JsonProcessingException e) {
-                            parseErrorCount++;
-                            logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
-                        }
+                        logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}", url, statusCode,
+                                response.getReasonPhrase());
+                        response.close();
+                        throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
+                                resolveErrorCode(statusCode));
                     }
-                }
 
-                final long evalDurationMs = evalDurationNs / 1_000_000L;
-                final String tokensPerSecond =
-                        evalDurationMs > 0 ? String.format(Locale.ROOT, "%.2f", evalCount * 1000.0 / evalDurationMs) : "n/a";
-                logger.info(
-                        "[LLM:OLLAMA] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, "
-                                + "doneReason={}, totalDurationMs={}, loadDurationMs={}, promptEvalDurationMs={}, "
-                                + "evalDurationMs={}, promptEvalCount={}, evalCount={}, tokensPerSecond={}, parseErrorCount={}",
-                        chunkCount, objectCount, firstChunkTime, System.currentTimeMillis() - startTime, doneReason,
-                        totalDurationNs / 1_000_000L, loadDurationNs / 1_000_000L, promptEvalDurationNs / 1_000_000L, evalDurationMs,
-                        promptEvalCount, evalCount, tokensPerSecond, parseErrorCount);
-                if (doneReason != null && !"stop".equals(doneReason) && !"load".equals(doneReason) && !"unload".equals(doneReason)) {
-                    logger.warn("[LLM:OLLAMA] Stream finished abnormally. doneReason={}, evalCount={}, " + "promptEvalCount={}, model={}",
-                            doneReason, evalCount, promptEvalCount, requestBody.get("model"));
+                    final var contentTypeHeader = response.getFirstHeader("Content-Type");
+                    final String contentType = contentTypeHeader == null ? "" : contentTypeHeader.getValue();
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("[LLM:OLLAMA] Stream response received. status={}, contentType={}", statusCode,
+                                contentType.isEmpty() ? "<absent>" : contentType);
+                    }
+                    if (!contentType.toLowerCase(Locale.ROOT).startsWith("application/x-ndjson")) {
+                        logger.warn(
+                                "[LLM:OLLAMA] Unexpected Content-Type for streaming response. "
+                                        + "expected=application/x-ndjson, actual='{}'. Likely a misconfigured proxy or version mismatch.",
+                                contentType.isEmpty() ? "<absent>" : contentType);
+                    }
+
+                    if (response.getEntity() == null) {
+                        logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
+                        response.close();
+                        throw new LlmException("Empty response from Ollama");
+                    }
+
+                    consumeStream(requestBody, response, callback, startTime);
+                    return null;
+                } catch (final RuntimeException | IOException e) {
+                    try {
+                        response.close();
+                    } catch (final IOException closeEx) {
+                        // ignore
+                    }
+                    throw e;
                 }
-            }
+            });
         } catch (final LlmException e) {
             callback.onError(e);
             throw e;
@@ -352,6 +294,103 @@ public class OllamaLlmClient extends AbstractLlmClient {
             final LlmException llmException = new LlmException("Failed to stream from Ollama API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
+        }
+    }
+
+    /**
+     * Consumes the NDJSON streaming body and emits chunks via {@code callback}.
+     * Caller is responsible for closing {@code response}.
+     *
+     * @param requestBody the request body (used for log context).
+     * @param response the HTTP response holding the NDJSON entity.
+     * @param callback the stream callback to invoke for each chunk.
+     * @param startTime the millisecond timestamp captured before the request, for elapsed-time logs.
+     * @throws IOException if reading the stream fails.
+     */
+    private void consumeStream(final Map<String, Object> requestBody,
+            final org.apache.hc.client5.http.impl.classic.CloseableHttpResponse response, final LlmStreamCallback callback,
+            final long startTime) throws IOException {
+        int chunkCount = 0;
+        int objectCount = 0;
+        int parseErrorCount = 0;
+        long firstChunkTime = 0;
+        String doneReason = null;
+        long totalDurationNs = 0L;
+        long loadDurationNs = 0L;
+        long promptEvalDurationNs = 0L;
+        long evalDurationNs = 0L;
+        int promptEvalCount = 0;
+        int evalCount = 0;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (StringUtil.isBlank(line)) {
+                    continue;
+                }
+                try {
+                    final JsonNode jsonNode = objectMapper.readTree(line);
+                    objectCount++;
+                    final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
+
+                    if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
+                        final String content = jsonNode.get("message").get("content").asText();
+                        if (content.isEmpty() && !done && jsonNode.get("message").has("thinking")) {
+                            // Skip thinking-only chunk
+                            continue;
+                        }
+                        callback.onChunk(content, done);
+                        if (chunkCount == 0) {
+                            firstChunkTime = System.currentTimeMillis() - startTime;
+                        }
+                        chunkCount++;
+                    } else if (done) {
+                        callback.onChunk("", true);
+                    }
+
+                    if (done) {
+                        if (jsonNode.has("done_reason")) {
+                            doneReason = jsonNode.get("done_reason").asText();
+                        }
+                        if (jsonNode.has("total_duration")) {
+                            totalDurationNs = jsonNode.get("total_duration").asLong();
+                        }
+                        if (jsonNode.has("load_duration")) {
+                            loadDurationNs = jsonNode.get("load_duration").asLong();
+                        }
+                        if (jsonNode.has("prompt_eval_duration")) {
+                            promptEvalDurationNs = jsonNode.get("prompt_eval_duration").asLong();
+                        }
+                        if (jsonNode.has("eval_duration")) {
+                            evalDurationNs = jsonNode.get("eval_duration").asLong();
+                        }
+                        if (jsonNode.has("prompt_eval_count")) {
+                            promptEvalCount = jsonNode.get("prompt_eval_count").asInt();
+                        }
+                        if (jsonNode.has("eval_count")) {
+                            evalCount = jsonNode.get("eval_count").asInt();
+                        }
+                        break;
+                    }
+                } catch (final JsonProcessingException e) {
+                    parseErrorCount++;
+                    logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
+                }
+            }
+        }
+
+        final long evalDurationMs = evalDurationNs / 1_000_000L;
+        final String tokensPerSecond = evalDurationMs > 0 ? String.format(Locale.ROOT, "%.2f", evalCount * 1000.0 / evalDurationMs) : "n/a";
+        logger.info(
+                "[LLM:OLLAMA] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, "
+                        + "doneReason={}, totalDurationMs={}, loadDurationMs={}, promptEvalDurationMs={}, "
+                        + "evalDurationMs={}, promptEvalCount={}, evalCount={}, tokensPerSecond={}, parseErrorCount={}",
+                chunkCount, objectCount, firstChunkTime, System.currentTimeMillis() - startTime, doneReason, totalDurationNs / 1_000_000L,
+                loadDurationNs / 1_000_000L, promptEvalDurationNs / 1_000_000L, evalDurationMs, promptEvalCount, evalCount, tokensPerSecond,
+                parseErrorCount);
+
+        if (doneReason != null && !"stop".equals(doneReason) && !"load".equals(doneReason) && !"unload".equals(doneReason)) {
+            logger.warn("[LLM:OLLAMA] Stream finished abnormally. doneReason={}, evalCount={}, " + "promptEvalCount={}, model={}",
+                    doneReason, evalCount, promptEvalCount, requestBody.get("model"));
         }
     }
 

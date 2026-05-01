@@ -442,20 +442,32 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             server.enqueue(new MockResponse().setResponseCode(500).setBody("Internal Server Error"));
             server.start();
 
-            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
-            client.setTestModel("llama3:latest");
-            client.setTestTemperature(0.7);
-            client.setTestMaxTokens(1000);
-            client.initHttpClient();
+            // Use a single-attempt client so the retryable 500 surfaces immediately.
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+                @Override
+                protected int getRetryMaxAttempts() {
+                    return 1;
+                }
+
+                @Override
+                protected long getRetryBaseDelayMs() {
+                    return 1L;
+                }
+            };
+            localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            localClient.setTestModel("llama3:latest");
+            localClient.setTestTemperature(0.7);
+            localClient.setTestMaxTokens(1000);
+            localClient.initHttpClient();
 
             final LlmChatRequest request = new LlmChatRequest();
             request.addMessage(new LlmMessage("user", "Hello"));
 
             try {
-                client.chat(request);
+                localClient.chat(request);
                 fail("Expected LlmException");
             } catch (final LlmException e) {
-                assertTrue(e.getMessage().contains("Ollama API error"));
+                assertTrue(e.getMessage().contains("Ollama API"));
             }
         } finally {
             server.shutdown();
@@ -515,11 +527,23 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             server.enqueue(new MockResponse().setResponseCode(503).setBody("Service Unavailable"));
             server.start();
 
-            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
-            client.setTestModel("llama3:latest");
-            client.setTestTemperature(0.7);
-            client.setTestMaxTokens(1000);
-            client.initHttpClient();
+            // Use a single-attempt client so the retryable 503 surfaces immediately.
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+                @Override
+                protected int getRetryMaxAttempts() {
+                    return 1;
+                }
+
+                @Override
+                protected long getRetryBaseDelayMs() {
+                    return 1L;
+                }
+            };
+            localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            localClient.setTestModel("llama3:latest");
+            localClient.setTestTemperature(0.7);
+            localClient.setTestMaxTokens(1000);
+            localClient.initHttpClient();
 
             final LlmChatRequest request = new LlmChatRequest();
             request.addMessage(new LlmMessage("user", "Hello"));
@@ -527,7 +551,7 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             final List<Throwable> errors = new ArrayList<>();
 
             try {
-                client.streamChat(request, new LlmStreamCallback() {
+                localClient.streamChat(request, new LlmStreamCallback() {
                     @Override
                     public void onChunk(final String content, final boolean done) {
                         fail("Should not receive chunks on error");
@@ -540,7 +564,7 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
                 });
                 fail("Expected LlmException");
             } catch (final LlmException e) {
-                assertTrue(e.getMessage().contains("Ollama API error"));
+                assertTrue(e.getMessage().contains("Ollama API"));
             }
 
             assertEquals(1, errors.size());
@@ -1317,6 +1341,181 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         } catch (final java.io.IOException e) {
             assertTrue(e.getMessage().contains("connection refused attempt 2"));
             assertEquals(2, callCount.get());
+        }
+    }
+
+    // --- chat() / streamChat() retry wiring (Task 6) ---
+
+    @Test
+    public void test_chat_retriesOn503() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setResponseCode(503));
+        final String successBody = "{\"model\":\"llama3:latest\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},"
+                + "\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":3,\"eval_count\":1}";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/json").setBody(successBody));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+                @Override
+                protected int getRetryMaxAttempts() {
+                    return 3;
+                }
+
+                @Override
+                protected long getRetryBaseDelayMs() {
+                    return 1L;
+                }
+            };
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            final LlmChatResponse response = localClient.chat(request);
+            assertEquals("ok", response.getContent());
+            assertEquals(2, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_retriesOn503BeforeBody() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setResponseCode(503));
+        final String successBody = "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
+                + "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(successBody));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+                @Override
+                protected int getRetryMaxAttempts() {
+                    return 3;
+                }
+
+                @Override
+                protected long getRetryBaseDelayMs() {
+                    return 1L;
+                }
+            };
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            final java.util.List<String> chunks = new java.util.ArrayList<>();
+            localClient.streamChat(request, (content, done) -> chunks.add(content));
+            assertEquals(List.of("hi", ""), chunks);
+            assertEquals(2, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_doesNotRetryOn404() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setResponseCode(404).setBody("model not found"));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+                @Override
+                protected int getRetryMaxAttempts() {
+                    return 5;
+                }
+
+                @Override
+                protected long getRetryBaseDelayMs() {
+                    return 1L;
+                }
+            };
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.chat(request);
+                fail("expected LlmException");
+            } catch (final LlmException e) {
+                // expected
+            }
+            assertEquals("404 must not be retried", 1, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_retryBudgetExhausted() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setResponseCode(503));
+        server.enqueue(new MockResponse().setResponseCode(503));
+        server.enqueue(new MockResponse().setResponseCode(503));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+                @Override
+                protected int getRetryMaxAttempts() {
+                    return 3;
+                }
+
+                @Override
+                protected long getRetryBaseDelayMs() {
+                    return 1L;
+                }
+            };
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.chat(request);
+                fail("expected LlmException after retries exhausted");
+            } catch (final LlmException e) {
+                // expected
+            }
+            assertEquals(3, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_retryAttemptLogged() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setResponseCode(503));
+        final String successBody = "{\"model\":\"llama3:latest\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},"
+                + "\"done\":true,\"done_reason\":\"stop\"}";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/json").setBody(successBody));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient() {
+                @Override
+                protected int getRetryMaxAttempts() {
+                    return 3;
+                }
+
+                @Override
+                protected long getRetryBaseDelayMs() {
+                    return 1L;
+                }
+            };
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                final LlmChatRequest request = new LlmChatRequest();
+                request.setMessages(List.of(new LlmMessage("user", "hi")));
+                localClient.chat(request);
+                assertTrue(
+                        capture.infos()
+                                .stream()
+                                .anyMatch(m -> m.contains("chat retrying") && m.contains("attempt=1/3") && m.contains("status=503")),
+                        "retry INFO line missing");
+            } finally {
+                capture.detach();
+            }
+        } finally {
+            server.shutdown();
         }
     }
 
