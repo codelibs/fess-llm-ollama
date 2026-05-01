@@ -519,6 +519,56 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_inStreamErrorTriggersOnError() throws Exception {
+        // Ollama streams in-flight failures as NDJSON {"error": "..."} after the connection
+        // succeeds with HTTP 200. The plugin must surface that to LlmStreamCallback.onError(...)
+        // rather than treating it as a normal completion.
+        // See https://docs.ollama.com/api/errors
+        final MockWebServer server = new MockWebServer();
+        try {
+            final String body = "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n"
+                    + "{\"error\":\"model 'qwen3.5:35b' not found, try pulling it first\"}\n";
+            server.enqueue(new MockResponse().setBody(body).setHeader("Content-Type", "application/x-ndjson"));
+            server.start();
+
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            localClient.setTestModel("qwen3.5:35b");
+            localClient.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final List<Throwable> errors = new ArrayList<>();
+            final List<String> chunks = new ArrayList<>();
+
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String content, final boolean done) {
+                        chunks.add(content);
+                    }
+
+                    @Override
+                    public void onError(final Throwable e) {
+                        errors.add(e);
+                    }
+                });
+                fail("Expected LlmException to be propagated");
+            } catch (final LlmException e) {
+                assertTrue(e.getMessage().contains("Ollama stream error"));
+                assertTrue(e.getMessage().contains("model 'qwen3.5:35b' not found"));
+            }
+
+            assertEquals(1, errors.size());
+            // The first chunk delivered before the error is allowed to flow through.
+            assertEquals(List.of("Hello"), chunks);
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
     public void test_streamChat_apiError() throws Exception {
         final MockWebServer server = new MockWebServer();
         try {
@@ -850,6 +900,95 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
 
         final Map<String, Object> body = client.buildRequestBody(request, false);
         assertFalse(body.containsKey("think"));
+    }
+
+    @Test
+    public void test_buildRequestBody_thinkingLevelHigh() {
+        client.setTestModel("gpt-oss:20b");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.putExtraParam("thinking_level", "high");
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        assertEquals("high", body.get("think"));
+    }
+
+    @Test
+    public void test_buildRequestBody_thinkingLevelOverridesBudget() {
+        client.setTestModel("gpt-oss:20b");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.setThinkingBudget(0);
+        request.putExtraParam("thinking_level", "medium");
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        // GPT-OSS ignores boolean form, so the string level must win.
+        assertEquals("medium", body.get("think"));
+    }
+
+    @Test
+    public void test_buildRequestBody_thinkingLevelInvalidFallsBackToBudget() {
+        client.setTestModel("qwen3.5:35b");
+
+        final LlmChatRequest request = new LlmChatRequest();
+        request.addMessage(new LlmMessage("user", "Hello"));
+        request.setThinkingBudget(1);
+        // "max" is not a recognized level — fall back to boolean form.
+        request.putExtraParam("thinking_level", "max");
+
+        final Map<String, Object> body = client.buildRequestBody(request, false);
+        assertEquals(Boolean.TRUE, body.get("think"));
+    }
+
+    @Test
+    public void test_isValidThinkingLevel_acceptsRecognizedValues() {
+        assertTrue(OllamaLlmClient.isValidThinkingLevel("high"));
+        assertTrue(OllamaLlmClient.isValidThinkingLevel("medium"));
+        assertTrue(OllamaLlmClient.isValidThinkingLevel("low"));
+        assertTrue(OllamaLlmClient.isValidThinkingLevel("HIGH"));
+        assertTrue(OllamaLlmClient.isValidThinkingLevel("Medium"));
+    }
+
+    @Test
+    public void test_isValidThinkingLevel_rejectsOthers() {
+        assertFalse(OllamaLlmClient.isValidThinkingLevel(null));
+        assertFalse(OllamaLlmClient.isValidThinkingLevel(""));
+        assertFalse(OllamaLlmClient.isValidThinkingLevel("max"));
+        assertFalse(OllamaLlmClient.isValidThinkingLevel("true"));
+    }
+
+    @Test
+    public void test_normalizeApiUrl_stripsApiSuffix() {
+        // Official Ollama base URLs end with /api — both forms must collapse to the host root.
+        assertEquals("http://localhost:11434", OllamaLlmClient.normalizeApiUrl("http://localhost:11434/api"));
+        assertEquals("https://ollama.com", OllamaLlmClient.normalizeApiUrl("https://ollama.com/api"));
+    }
+
+    @Test
+    public void test_normalizeApiUrl_stripsTrailingSlashes() {
+        assertEquals("http://localhost:11434", OllamaLlmClient.normalizeApiUrl("http://localhost:11434/"));
+        assertEquals("http://localhost:11434", OllamaLlmClient.normalizeApiUrl("http://localhost:11434/api/"));
+        assertEquals("http://localhost:11434", OllamaLlmClient.normalizeApiUrl("http://localhost:11434//"));
+    }
+
+    @Test
+    public void test_normalizeApiUrl_idempotent() {
+        final String once = OllamaLlmClient.normalizeApiUrl("http://localhost:11434/api/");
+        assertEquals(once, OllamaLlmClient.normalizeApiUrl(once));
+    }
+
+    @Test
+    public void test_normalizeApiUrl_keepsRootHost() {
+        assertEquals("http://localhost:11434", OllamaLlmClient.normalizeApiUrl("http://localhost:11434"));
+    }
+
+    @Test
+    public void test_normalizeApiUrl_handlesNullAndBlank() {
+        assertNull(OllamaLlmClient.normalizeApiUrl(null));
+        assertEquals("", OllamaLlmClient.normalizeApiUrl(""));
+        assertEquals("", OllamaLlmClient.normalizeApiUrl("   "));
     }
 
     @Test
@@ -1202,21 +1341,26 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     @Test
     public void test_isRetryableStatus_retriesServerErrors() {
         assertTrue(OllamaLlmClient.isRetryableStatus(500));
+        assertTrue(OllamaLlmClient.isRetryableStatus(502));
         assertTrue(OllamaLlmClient.isRetryableStatus(503));
         assertTrue(OllamaLlmClient.isRetryableStatus(504));
     }
 
     @Test
-    public void test_isRetryableStatus_doesNotRetry429Or4xx() {
-        assertFalse(OllamaLlmClient.isRetryableStatus(429));
+    public void test_isRetryableStatus_retries429() {
+        // 429 Too Many Requests is a documented Ollama error (Cloud / rate-limited proxies).
+        assertTrue(OllamaLlmClient.isRetryableStatus(429));
+    }
+
+    @Test
+    public void test_isRetryableStatus_doesNotRetryNon429_4xx() {
         assertFalse(OllamaLlmClient.isRetryableStatus(400));
         assertFalse(OllamaLlmClient.isRetryableStatus(404));
         assertFalse(OllamaLlmClient.isRetryableStatus(401));
     }
 
     @Test
-    public void test_isRetryableStatus_doesNotRetry502Or200() {
-        assertFalse(OllamaLlmClient.isRetryableStatus(502));
+    public void test_isRetryableStatus_doesNotRetry200() {
         assertFalse(OllamaLlmClient.isRetryableStatus(200));
     }
 

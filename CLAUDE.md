@@ -30,7 +30,7 @@ Code formatting is enforced by `formatter-maven-plugin` and license headers by `
 
 ## Architecture
 
-- `OllamaLlmClient` — the only production class. Extends `AbstractLlmClient` (from `fess` core, provided scope). Implements `chat()`, `streamChat()`, and `checkAvailabilityNow()`. Configuration is read from `fess_config.properties` via `ComponentUtil.getFessConfig()` with prefix `rag.llm.ollama.*`.
+- `OllamaLlmClient` — the only production class. Extends `AbstractLlmClient` (from `fess` core, provided scope). Implements `chat()`, `streamChat()`, and `checkAvailabilityNow()`. Configuration is read from `fess_config.properties` via `ComponentUtil.getFessConfig()` with prefix `rag.llm.ollama.*`. `getApiUrl()` normalizes the configured URL by stripping a trailing `/api` segment and trailing slash, so that `http://localhost:11434`, `http://localhost:11434/`, and `http://localhost:11434/api` (the form shown in the official Ollama docs) all resolve to the same base.
 - Ollama-specific parameter mapping: `temperature` → `temperature`, `maxTokens` → `num_predict`, `top_p`/`top_k`/`num_ctx` via extra params. Global options from `rag.llm.ollama.options.*` system properties.
 - Per-prompt-type config supports fallback to `rag.llm.ollama.default.*` keys.
 - HTTP via Apache HttpClient 5. Streaming uses NDJSON line-by-line parsing.
@@ -53,12 +53,15 @@ Enable `org.codelibs.fess.llm.ollama` at DEBUG to additionally log:
 
 ### Retries and timeouts
 
-Retries: HTTP `500`, `503`, `504` and connect-time `IOException` are retried up
-to `rag.llm.ollama.retry.max` times (default `3`) with exponential backoff
-starting at `rag.llm.ollama.retry.base.delay.ms` (default `2000`) and ±20%
-jitter. `429` is NOT retried (Ollama does not emit it); `4xx` is treated as a
-configuration error. Streaming retries only the initial connect — once the
-NDJSON body starts flowing, partial-stream errors propagate immediately.
+Retries: HTTP `429`, `500`, `502`, `503`, `504` and connect-time `IOException`
+are retried up to `rag.llm.ollama.retry.max` times (default `3`) with
+exponential backoff starting at `rag.llm.ollama.retry.base.delay.ms` (default
+`2000`) and ±20% jitter. The retryable set tracks the documented Ollama errors
+(<https://docs.ollama.com/api/errors>) and covers Ollama Cloud rate limits.
+Other `4xx` is treated as a configuration error. Streaming retries only the
+initial connect — once the NDJSON body starts flowing, partial-stream errors
+(transport failures **or** in-stream `{"error": "..."}` payloads) propagate
+immediately to `LlmStreamCallback.onError(...)`.
 
 Timeouts are two-tier:
 - `rag.llm.ollama.connect.timeout` (default `5000`) — TCP connect, connection-request acquisition.
@@ -74,7 +77,8 @@ Each prompt type (`intent`, `evaluation`, `unclear`, `noresults`, `docnotfound`,
 `direct`, `faq`, `answer`, `summary`, `queryregeneration`) supports the
 following per-type overrides via `fess_config.properties`:
 
-- `rag.llm.ollama.<type>.thinking.budget`
+- `rag.llm.ollama.<type>.thinking.budget` — boolean form (`0` ⇒ `think: false`, `>0` ⇒ `think: true`)
+- `rag.llm.ollama.<type>.thinking.level` — string form (`high` / `medium` / `low`); required for GPT-OSS family models which ignore the boolean form. When set, overrides the boolean derived from `thinking.budget` for that prompt type.
 - `rag.llm.ollama.<type>.max.tokens`
 - `rag.llm.ollama.<type>.temperature`
 - `rag.llm.ollama.<type>.top.p`, `.top.k`, `.num.ctx`

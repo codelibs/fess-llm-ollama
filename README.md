@@ -31,7 +31,7 @@ Configure the following properties in `fess_config.properties`:
 |----------|---------|-------------|
 | `rag.llm.name` | - | Set to `ollama` to use this plugin |
 | `rag.chat.enabled` | `false` | Enable RAG chat feature |
-| `rag.llm.ollama.api.url` | `http://localhost:11434` | Ollama API endpoint URL |
+| `rag.llm.ollama.api.url` | `http://localhost:11434` | Ollama server root URL. The plugin appends `/api/chat` and `/api/tags`, so a trailing `/` or `/api` (the form shown in the Ollama docs, e.g. `http://localhost:11434/api` or `https://ollama.com/api`) is stripped automatically. |
 | `rag.llm.ollama.answer.context.max.chars` | `10000` | Maximum characters for document context in answer generation |
 | `rag.llm.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability |
 | `rag.llm.ollama.chat.evaluation.max.relevant.docs` | `3` | Maximum number of relevant documents for evaluation |
@@ -42,7 +42,7 @@ Configure the following properties in `fess_config.properties`:
 | `rag.llm.ollama.faq.context.max.chars` | `6000` | Maximum characters for document context in FAQ generation |
 | `rag.llm.ollama.model` | `gemma4:e4b` | Model name (e.g., `llama3:latest`, `mistral`) |
 | `rag.llm.ollama.retry.base.delay.ms` | `2000` | Base delay (ms) for exponential backoff with ±20% jitter. |
-| `rag.llm.ollama.retry.max` | `3` | Maximum total attempts on retryable HTTP errors (500/503/504) and connect-time IOExceptions. |
+| `rag.llm.ollama.retry.max` | `3` | Maximum total attempts on retryable HTTP errors (429/500/502/503/504) and connect-time IOExceptions. |
 | `rag.llm.ollama.summary.context.max.chars` | `10000` | Maximum characters for document context in summary generation |
 | `rag.llm.ollama.timeout` | `60000` | Response/read timeout (ms). For TCP connect timeout see `rag.llm.ollama.connect.timeout`. |
 
@@ -67,14 +67,17 @@ You can configure `top_p` and `top_k` sampling parameters for each prompt type:
 
 Both `chat()` and `streamChat()` retry on:
 
-- HTTP `500`, `503` (Ollama queue overload via `OLLAMA_MAX_QUEUE`), `504`
+- HTTP `429` (Too Many Requests; Ollama Cloud and rate-limited proxies)
+- HTTP `500`, `502`, `503` (Ollama queue overload via `OLLAMA_MAX_QUEUE`), `504`
 - `IOException` raised before a response is received (DNS, TCP, TLS, idle-socket failures)
 
-`429` is **not** retried — Ollama does not return 429. `4xx` errors are surfaced as
-`LlmException` immediately.
+Other `4xx` errors are surfaced as `LlmException` immediately.
 
 Streaming retries only the initial HTTP request. Once NDJSON bytes start flowing,
-in-stream errors propagate immediately (no replay).
+in-stream errors (HTTP transport failures **or** NDJSON `{"error": "..."}` payloads)
+propagate immediately to `LlmStreamCallback.onError(...)` — no replay.
+
+The retry status set tracks the documented [Ollama errors](https://docs.ollama.com/api/errors).
 
 Defaults can be overridden via `rag.llm.ollama.retry.max` and
 `rag.llm.ollama.retry.base.delay.ms`.
@@ -124,12 +127,29 @@ rag.llm.ollama.faq.thinking.budget=1
 rag.llm.ollama.faq.max.tokens=8192
 ```
 
-The `thinking.budget` parameter controls the Ollama `think` flag:
+The `thinking.budget` parameter controls the Ollama `think` flag as a boolean:
 - `0` — disable thinking (`think: false`)
 - Any positive value — enable thinking (`think: true`)
 - Not set — use model default (reasoning models default to thinking enabled)
 
 When thinking is enabled, increase `max.tokens` to accommodate both thinking and content tokens.
+
+### thinking.level (GPT-OSS and other models that ignore the boolean form)
+
+Per [Ollama's thinking docs](https://docs.ollama.com/capabilities/thinking), the `think`
+field also accepts the string values `high`, `medium`, and `low`. GPT-OSS models in
+particular ignore the boolean form. Use `rag.llm.ollama.<promptType>.thinking.level`
+(or `rag.llm.ollama.default.thinking.level`) to send a string instead of a boolean:
+
+```properties
+rag.llm.ollama.model=gpt-oss:20b
+rag.llm.ollama.answer.thinking.level=high
+rag.llm.ollama.intent.thinking.level=low
+```
+
+When `thinking.level` is set, it overrides the boolean derived from `thinking.budget`
+for that prompt type. Allowed values: `high`, `medium`, `low` (case-insensitive).
+Invalid values are ignored with a WARN log and fall back to `thinking.budget`.
 
 ## Features
 

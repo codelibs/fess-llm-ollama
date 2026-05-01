@@ -340,6 +340,14 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 try {
                     final JsonNode jsonNode = objectMapper.readTree(line);
                     objectCount++;
+
+                    final JsonNode errorNode = jsonNode.path("error");
+                    if (!errorNode.isMissingNode() && !errorNode.isNull()) {
+                        final String errorMessage = errorNode.asText();
+                        logger.warn("[LLM:OLLAMA] Stream error received from Ollama. model={}, error={}", model, errorMessage);
+                        throw new LlmException("Ollama stream error: " + errorMessage, LlmException.ERROR_INVALID_RESPONSE);
+                    }
+
                     final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
 
                     final JsonNode messageNode = jsonNode.path("message");
@@ -453,12 +461,34 @@ public class OllamaLlmClient extends AbstractLlmClient {
             body.put("options", options);
         }
 
-        final Integer thinkingBudget = request.getThinkingBudget();
-        if (thinkingBudget != null) {
-            body.put("think", thinkingBudget > 0);
+        final String thinkingLevel = request.getExtraParam("thinking_level");
+        if (thinkingLevel != null && isValidThinkingLevel(thinkingLevel)) {
+            body.put("think", thinkingLevel.toLowerCase(Locale.ROOT));
+        } else {
+            final Integer thinkingBudget = request.getThinkingBudget();
+            if (thinkingBudget != null) {
+                body.put("think", thinkingBudget > 0);
+            }
         }
 
         return body;
+    }
+
+    /**
+     * Returns whether the given value is one of the string thinking levels recognized by
+     * Ollama's Chat API ({@code "high"}, {@code "medium"}, {@code "low"}). Required for
+     * GPT-OSS family models which ignore the boolean form of {@code think}.
+     *
+     * @param value the candidate level string (case-insensitive); {@code null} is rejected.
+     * @return {@code true} when the value is a recognized level.
+     * @see <a href="https://docs.ollama.com/capabilities/thinking">Ollama thinking docs</a>
+     */
+    static boolean isValidThinkingLevel(final String value) {
+        if (value == null) {
+            return false;
+        }
+        final String normalized = value.toLowerCase(Locale.ROOT);
+        return "high".equals(normalized) || "medium".equals(normalized) || "low".equals(normalized);
     }
 
     /**
@@ -532,10 +562,45 @@ public class OllamaLlmClient extends AbstractLlmClient {
     /**
      * Gets the Ollama API URL.
      *
-     * @return the API URL
+     * <p>Normalizes the configured value so that callers can append fixed paths like
+     * {@code /api/chat} or {@code /api/tags} without producing duplicates. Trailing
+     * {@code /} and a trailing {@code /api} segment (as documented in
+     * <a href="https://docs.ollama.com/api/introduction">Ollama API introduction</a>:
+     * {@code http://localhost:11434/api}, {@code https://ollama.com/api}) are stripped.
+     *
+     * @return the normalized API base URL (without trailing slash or {@code /api}).
      */
     protected String getApiUrl() {
-        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.api.url", "http://localhost:11434");
+        final String raw = ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.api.url", "http://localhost:11434");
+        return normalizeApiUrl(raw);
+    }
+
+    /**
+     * Strips a trailing {@code /} and a trailing {@code /api} segment from an Ollama base
+     * URL, leaving the host root that the client can suffix with {@code /api/chat} or
+     * {@code /api/tags}. Idempotent.
+     *
+     * @param url the raw configured URL.
+     * @return the normalized URL, or the input unchanged when blank.
+     */
+    static String normalizeApiUrl(final String url) {
+        if (url == null) {
+            return null;
+        }
+        String result = url.trim();
+        if (result.isEmpty()) {
+            return result;
+        }
+        while (result.endsWith("/")) {
+            result = result.substring(0, result.length() - 1);
+        }
+        if (result.endsWith("/api")) {
+            result = result.substring(0, result.length() - 4);
+        }
+        while (result.endsWith("/")) {
+            result = result.substring(0, result.length() - 1);
+        }
+        return result;
     }
 
     @Override
@@ -660,6 +725,16 @@ public class OllamaLlmClient extends AbstractLlmClient {
             final String thinkingBudget = getConfigWithFallback(prefix + ".thinking.budget", defaultPrefix + ".thinking.budget");
             if (thinkingBudget != null) {
                 request.setThinkingBudget(Integer.parseInt(thinkingBudget));
+            }
+        }
+        if (request.getExtraParam("thinking_level") == null) {
+            final String thinkingLevel = getConfigWithFallback(prefix + ".thinking.level", defaultPrefix + ".thinking.level");
+            if (thinkingLevel != null) {
+                if (isValidThinkingLevel(thinkingLevel)) {
+                    request.putExtraParam("thinking_level", thinkingLevel);
+                } else {
+                    logger.warn("[LLM:OLLAMA] Invalid thinking.level value, ignoring. value={}, allowed=[high,medium,low]", thinkingLevel);
+                }
             }
         }
         applyDefaultParams(request, promptType);
@@ -869,15 +944,18 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     /**
      * Returns whether the given HTTP status code should be retried. Retryable statuses
-     * for Ollama are {@code 500} (transient), {@code 503} (queue overload, the primary
-     * target), and {@code 504} (gateway timeout when behind a reverse proxy). Notably
-     * NOT retried: {@code 429} (Ollama does not emit) and {@code 502}.
+     * cover Ollama's documented common errors: {@code 429} (Too Many Requests, returned
+     * by Ollama Cloud and rate-limited proxies), {@code 500} (transient internal error),
+     * {@code 502} (Bad Gateway, also documented as a common error), {@code 503} (queue
+     * overload, the primary target for self-hosted), and {@code 504} (gateway timeout
+     * when behind a reverse proxy).
      *
      * @param statusCode the HTTP status code.
      * @return {@code true} when the status is retryable.
+     * @see <a href="https://docs.ollama.com/api/errors">Ollama errors</a>
      */
     static boolean isRetryableStatus(final int statusCode) {
-        return statusCode == 500 || statusCode == 503 || statusCode == 504;
+        return statusCode == 429 || statusCode == 500 || statusCode == 502 || statusCode == 503 || statusCode == 504;
     }
 
     /**
