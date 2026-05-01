@@ -667,6 +667,75 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_lengthDoneReasonEmitsWarn() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        final String body = "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
+                + "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\","
+                + "\"prompt_eval_count\":12,\"eval_count\":48}\n";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                final LlmChatRequest request = new LlmChatRequest();
+                request.setMessages(List.of(new LlmMessage("user", "hi")));
+                localClient.streamChat(request, (content, done) -> {});
+                assertTrue(capture.warnings()
+                        .stream()
+                        .anyMatch(m -> m.contains("Stream finished abnormally") && m.contains("doneReason=length")
+                                && m.contains("evalCount=48")));
+            } finally {
+                capture.detach();
+            }
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_stopDoneReasonNoWarn() throws Exception {
+        assertNoAbnormalWarnFor("stop");
+    }
+
+    @Test
+    public void test_streamChat_loadDoneReasonNoWarn() throws Exception {
+        assertNoAbnormalWarnFor("load");
+    }
+
+    @Test
+    public void test_streamChat_unloadDoneReasonNoWarn() throws Exception {
+        assertNoAbnormalWarnFor("unload");
+    }
+
+    private void assertNoAbnormalWarnFor(final String doneReason) throws Exception {
+        final MockWebServer server = new MockWebServer();
+        final String body = "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
+                + "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"" + doneReason + "\"}\n";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                final LlmChatRequest request = new LlmChatRequest();
+                request.setMessages(List.of(new LlmMessage("user", "hi")));
+                localClient.streamChat(request, (content, done) -> {});
+                assertTrue("no abnormal warn expected for " + doneReason,
+                        capture.warnings().stream().noneMatch(m -> m.contains("Stream finished abnormally")));
+            } finally {
+                capture.detach();
+            }
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
     public void test_checkAvailabilityNow_success() throws Exception {
         final MockWebServer server = new MockWebServer();
         try {

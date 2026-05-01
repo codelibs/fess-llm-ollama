@@ -335,6 +335,10 @@ public class OllamaLlmClient extends AbstractLlmClient {
                         chunkCount, objectCount, firstChunkTime, System.currentTimeMillis() - startTime, doneReason,
                         totalDurationNs / 1_000_000L, loadDurationNs / 1_000_000L, promptEvalDurationNs / 1_000_000L, evalDurationMs,
                         promptEvalCount, evalCount, tokensPerSecond, parseErrorCount);
+                if (doneReason != null && !"stop".equals(doneReason) && !"load".equals(doneReason) && !"unload".equals(doneReason)) {
+                    logger.warn("[LLM:OLLAMA] Stream finished abnormally. doneReason={}, evalCount={}, " + "promptEvalCount={}, model={}",
+                            doneReason, evalCount, promptEvalCount, requestBody.get("model"));
+                }
             }
         } catch (final LlmException e) {
             callback.onError(e);
