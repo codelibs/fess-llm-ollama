@@ -604,6 +604,69 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_completionLogContainsOllamaMetrics() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        final String body = "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
+                + "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\","
+                + "\"total_duration\":2500000000,\"load_duration\":500000000,"
+                + "\"prompt_eval_count\":12,\"prompt_eval_duration\":300000000," + "\"eval_count\":48,\"eval_duration\":1500000000}\n";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                final LlmChatRequest request = new LlmChatRequest();
+                request.setMessages(List.of(new LlmMessage("user", "hi")));
+                localClient.streamChat(request, (content, done) -> {});
+                final String completionLine =
+                        capture.infos().stream().filter(m -> m.contains("Stream completed")).findFirst().orElseThrow();
+                assertTrue("doneReason missing: " + completionLine, completionLine.contains("doneReason=stop"));
+                assertTrue("totalDurationMs missing: " + completionLine, completionLine.contains("totalDurationMs=2500"));
+                assertTrue("loadDurationMs missing: " + completionLine, completionLine.contains("loadDurationMs=500"));
+                assertTrue("evalDurationMs missing: " + completionLine, completionLine.contains("evalDurationMs=1500"));
+                assertTrue("promptEvalCount missing: " + completionLine, completionLine.contains("promptEvalCount=12"));
+                assertTrue("evalCount missing: " + completionLine, completionLine.contains("evalCount=48"));
+                assertTrue("tokensPerSecond missing: " + completionLine, completionLine.contains("tokensPerSecond=32"));
+                assertTrue("parseErrorCount missing: " + completionLine, completionLine.contains("parseErrorCount=0"));
+            } finally {
+                capture.detach();
+            }
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_parseErrorCountedInCompletionLog() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        final String body = "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n" + "this-is-not-json\n"
+                + "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                final LlmChatRequest request = new LlmChatRequest();
+                request.setMessages(List.of(new LlmMessage("user", "hi")));
+                localClient.streamChat(request, (content, done) -> {});
+                final String completionLine =
+                        capture.infos().stream().filter(m -> m.contains("Stream completed")).findFirst().orElseThrow();
+                assertTrue("expected parseErrorCount=1: " + completionLine, completionLine.contains("parseErrorCount=1"));
+            } finally {
+                capture.detach();
+            }
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
     public void test_checkAvailabilityNow_success() throws Exception {
         final MockWebServer server = new MockWebServer();
         try {

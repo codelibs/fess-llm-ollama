@@ -257,7 +257,16 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 }
 
                 int chunkCount = 0;
+                int objectCount = 0;
+                int parseErrorCount = 0;
                 long firstChunkTime = 0;
+                String doneReason = null;
+                long totalDurationNs = 0L;
+                long loadDurationNs = 0L;
+                long promptEvalDurationNs = 0L;
+                long evalDurationNs = 0L;
+                int promptEvalCount = 0;
+                int evalCount = 0;
                 try (BufferedReader reader =
                         new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
                     String line;
@@ -267,6 +276,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                         }
                         try {
                             final JsonNode jsonNode = objectMapper.readTree(line);
+                            objectCount++;
                             final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
 
                             if (jsonNode.has("message") && jsonNode.get("message").has("content")) {
@@ -285,16 +295,46 @@ public class OllamaLlmClient extends AbstractLlmClient {
                             }
 
                             if (done) {
+                                if (jsonNode.has("done_reason")) {
+                                    doneReason = jsonNode.get("done_reason").asText();
+                                }
+                                if (jsonNode.has("total_duration")) {
+                                    totalDurationNs = jsonNode.get("total_duration").asLong();
+                                }
+                                if (jsonNode.has("load_duration")) {
+                                    loadDurationNs = jsonNode.get("load_duration").asLong();
+                                }
+                                if (jsonNode.has("prompt_eval_duration")) {
+                                    promptEvalDurationNs = jsonNode.get("prompt_eval_duration").asLong();
+                                }
+                                if (jsonNode.has("eval_duration")) {
+                                    evalDurationNs = jsonNode.get("eval_duration").asLong();
+                                }
+                                if (jsonNode.has("prompt_eval_count")) {
+                                    promptEvalCount = jsonNode.get("prompt_eval_count").asInt();
+                                }
+                                if (jsonNode.has("eval_count")) {
+                                    evalCount = jsonNode.get("eval_count").asInt();
+                                }
                                 break;
                             }
                         } catch (final JsonProcessingException e) {
+                            parseErrorCount++;
                             logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
                         }
                     }
                 }
 
-                logger.info("[LLM:OLLAMA] Stream completed. chunkCount={}, firstChunkMs={}, elapsedTime={}ms", chunkCount, firstChunkTime,
-                        System.currentTimeMillis() - startTime);
+                final long evalDurationMs = evalDurationNs / 1_000_000L;
+                final String tokensPerSecond =
+                        evalDurationMs > 0 ? String.format(Locale.ROOT, "%.2f", evalCount * 1000.0 / evalDurationMs) : "n/a";
+                logger.info(
+                        "[LLM:OLLAMA] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, "
+                                + "doneReason={}, totalDurationMs={}, loadDurationMs={}, promptEvalDurationMs={}, "
+                                + "evalDurationMs={}, promptEvalCount={}, evalCount={}, tokensPerSecond={}, parseErrorCount={}",
+                        chunkCount, objectCount, firstChunkTime, System.currentTimeMillis() - startTime, doneReason,
+                        totalDurationNs / 1_000_000L, loadDurationNs / 1_000_000L, promptEvalDurationNs / 1_000_000L, evalDurationMs,
+                        promptEvalCount, evalCount, tokensPerSecond, parseErrorCount);
             }
         } catch (final LlmException e) {
             callback.onError(e);
