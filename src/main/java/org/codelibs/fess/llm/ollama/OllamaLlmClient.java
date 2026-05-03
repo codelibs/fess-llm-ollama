@@ -296,7 +296,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     consumeStream((String) requestBody.get("model"), response, callback, startTime);
                     return null;
                 }
-            });
+            }, callback);
         } catch (final LlmException e) {
             callback.onError(e);
             throw e;
@@ -999,6 +999,23 @@ public class OllamaLlmClient extends AbstractLlmClient {
      *             budget is exhausted.
      */
     <T> T executeWithRetry(final String operation, final HttpCall<T> call) throws IOException {
+        return executeWithRetry(operation, call, null);
+    }
+
+    /**
+     * Same as {@link #executeWithRetry(String, HttpCall)} but additionally notifies the
+     * given {@link LlmStreamCallback} (when non-{@code null}) between attempts via
+     * {@link LlmStreamCallback#onRetry(String, int, int, long, Throwable)}.
+     *
+     * @param operation log label, e.g. {@code "chat"} or {@code "streamChat"}.
+     * @param call the HTTP call body.
+     * @param callback optional callback to notify on retry; may be {@code null}.
+     * @param <T> the call result type.
+     * @return the call result on success.
+     * @throws IOException if the call throws a non-retryable {@link IOException} or the retry
+     *             budget is exhausted.
+     */
+    <T> T executeWithRetry(final String operation, final HttpCall<T> call, final LlmStreamCallback callback) throws IOException {
         final int maxAttempts = Math.max(1, getRetryMaxAttempts());
         final long baseDelay = Math.max(0L, getRetryBaseDelayMs());
         IOException lastIo = null;
@@ -1010,13 +1027,13 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     logger.warn("[LLM:OLLAMA] {} retry exhausted. attempts={}, lastStatus={}", operation, attempt, e.statusCode);
                     throw new IOException("Ollama API retryable error: " + e.statusCode + " " + e.reason, e);
                 }
-                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "status", e.statusCode);
+                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "status", e.statusCode, callback, e);
             } catch (final IOException e) {
                 if (attempt == maxAttempts) {
                     lastIo = e;
                     break;
                 }
-                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "exception", e.getClass().getSimpleName());
+                sleepBackoff(operation, attempt, maxAttempts, baseDelay, "exception", e.getClass().getSimpleName(), callback, e);
             }
         }
         if (lastIo == null) {
@@ -1027,7 +1044,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     /**
      * Sleeps an exponential-backoff interval with +/-20% jitter and a hard cap.
-     * Logs the retry decision at INFO. Restores interrupt status if interrupted.
+     * Logs the retry decision at INFO and, when a callback is provided, invokes
+     * {@link LlmStreamCallback#onRetry(String, int, int, long, Throwable)} immediately
+     * after the log line and before the actual sleep. Restores interrupt status if
+     * interrupted. Exceptions thrown by the callback are swallowed (logged at DEBUG)
+     * so retry behavior is never affected by callback bugs.
      *
      * @param operation log label.
      * @param attempt 1-based current attempt index.
@@ -1035,15 +1056,27 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @param baseDelay base delay in milliseconds (already clamped to >=0).
      * @param logFieldKey log field name carrying the cause ("status" or "exception").
      * @param logFieldValue log field value for the cause.
+     * @param callback optional callback to notify; may be {@code null}.
+     * @param cause the cause of the retry passed to the callback.
      * @throws IOException if the sleep is interrupted.
      */
     private void sleepBackoff(final String operation, final int attempt, final int maxAttempts, final long baseDelay,
-            final String logFieldKey, final Object logFieldValue) throws IOException {
+            final String logFieldKey, final Object logFieldValue, final LlmStreamCallback callback, final Throwable cause)
+            throws IOException {
         final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
         final long delay = Math.min(MAX_BACKOFF_MS, (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter);
         final long sleepMs = Math.max(0, delay);
         logger.info("[LLM:OLLAMA] {} retrying. attempt={}/{}, {}={}, sleepMs={}", operation, attempt, maxAttempts, logFieldKey,
                 logFieldValue, sleepMs);
+        if (callback != null) {
+            try {
+                callback.onRetry(operation, attempt, maxAttempts, sleepMs, cause);
+            } catch (final Exception cbEx) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[LLM:OLLAMA] onRetry callback threw. error={}", cbEx.getMessage());
+                }
+            }
+        }
         try {
             Thread.sleep(sleepMs);
         } catch (final InterruptedException ie) {
