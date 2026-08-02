@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -49,6 +50,8 @@ import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.ollama.OllamaUrlUtil;
+import org.codelibs.fess.util.CredentialUrlUtil;
 import org.codelibs.fess.util.ComponentUtil;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -78,6 +81,15 @@ public class OllamaLlmClient extends AbstractLlmClient {
     private static final String CONFIG_RETRY_BASE_DELAY_MS = "retry.base.delay.ms";
     private static final String CONFIG_CONNECT_TIMEOUT = "connect.timeout";
 
+    /** Configuration key holding the Ollama endpoint, named in the userinfo refusal message. */
+    private static final String CONFIG_API_URL = "rag.llm.ollama.api.url";
+
+    /**
+     * Set once the userinfo refusal has been reported. The availability check runs on a
+     * timer, so an unguarded ERROR would repeat for as long as the misconfiguration stands.
+     */
+    private final AtomicBoolean userinfoRejectionReported = new AtomicBoolean();
+
     /**
      * Default constructor.
      */
@@ -99,13 +111,19 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
             return false;
         }
+        if (isUserinfoRefused(apiUrl)) {
+            // Fail closed: this method is reached synchronously from init(), so a throw here
+            // would escape the container's eager init-method assembler. See isUserinfoRefused.
+            return false;
+        }
         try {
-            final HttpGet request = new HttpGet(apiUrl + "/api/tags");
+            final HttpGet request = OllamaUrlUtil.createHttpGet(OllamaUrlUtil.appendPath(apiUrl, "/api/tags"), CONFIG_API_URL);
             try (var response = getHttpClient().execute(request)) {
                 final int statusCode = response.getCode();
                 if (statusCode < 200 || statusCode >= 300) {
                     if (logger.isDebugEnabled()) {
-                        logger.debug("[LLM:OLLAMA] Ollama availability check failed. url={}, statusCode={}", apiUrl, statusCode);
+                        logger.debug("[LLM:OLLAMA] Ollama availability check failed. url={}, statusCode={}",
+                                CredentialUrlUtil.maskCredentialInUrl(apiUrl), statusCode);
                     }
                     return false;
                 }
@@ -115,7 +133,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
         } catch (final Exception e) {
             if (logger.isDebugEnabled()) {
-                logger.debug("[LLM:OLLAMA] Ollama is not available. url={}, error={}", apiUrl, e.getMessage());
+                logger.debug("[LLM:OLLAMA] Ollama is not available. url={}, error={}", CredentialUrlUtil.maskCredentialInUrl(apiUrl),
+                        e.getMessage());
             }
             return false;
         }
@@ -160,15 +179,51 @@ public class OllamaLlmClient extends AbstractLlmClient {
         }
     }
 
+    /**
+     * Reports whether {@code apiUrl} carries a userinfo subcomponent, logging the remedy at
+     * ERROR the first time it does. See
+     * {@link OllamaUrlUtil#userinfoRejectionMessage(String)} for why such an endpoint can
+     * never issue a request and what the operator should configure instead.
+     *
+     * <p><b>Callers must fail closed on the availability path.</b>
+     * {@link #checkAvailabilityNow()} is reached synchronously from {@link #init()}
+     * ({@code init -> startAvailabilityCheck -> updateAvailability -> checkAvailabilityNow}),
+     * and {@code init()} is the DI container's eager init method; an exception thrown there
+     * aborts container assembly and stops the application from starting. Reporting the client
+     * unavailable leaves a misconfigured endpoint disabled and diagnosed instead of fatal.
+     * Request-time callers ({@link #chat(LlmChatRequest)},
+     * {@link #streamChat(LlmChatRequest, LlmStreamCallback)}) are not on that path and do
+     * throw, so the caller gets the remedy rather than an opaque protocol failure.
+     *
+     * <p>The message names only the configuration key and the proxy settings, never any part
+     * of the configured value, so the credential reaches neither the log nor the exception.
+     *
+     * @param apiUrl the configured endpoint.
+     * @return {@code true} when the endpoint must be refused.
+     */
+    protected boolean isUserinfoRefused(final String apiUrl) {
+        if (!CredentialUrlUtil.hasUserInfo(apiUrl)) {
+            return false;
+        }
+        if (userinfoRejectionReported.compareAndSet(false, true)) {
+            logger.error("[LLM:OLLAMA] {}", OllamaUrlUtil.userinfoRejectionMessage(CONFIG_API_URL));
+        }
+        return true;
+    }
+
     @Override
     public LlmChatResponse chat(final LlmChatRequest request) {
-        final String url = getApiUrl() + "/api/chat";
+        final String apiUrl = getApiUrl();
+        if (isUserinfoRefused(apiUrl)) {
+            throw new LlmException(OllamaUrlUtil.userinfoRejectionMessage(CONFIG_API_URL), LlmException.ERROR_CONNECTION);
+        }
+        final String url = OllamaUrlUtil.appendPath(apiUrl, "/api/chat");
         final Map<String, Object> requestBody = buildRequestBody(request, false);
         final long startTime = System.currentTimeMillis();
 
         if (logger.isDebugEnabled()) {
-            logger.debug("[LLM:OLLAMA] Sending chat request to Ollama. url={}, model={}, messageCount={}", url, requestBody.get("model"),
-                    request.getMessages().size());
+            logger.debug("[LLM:OLLAMA] Sending chat request to Ollama. url={}, model={}, messageCount={}",
+                    CredentialUrlUtil.maskCredentialInUrl(url), requestBody.get("model"), request.getMessages().size());
         }
 
         try {
@@ -177,7 +232,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 logger.debug("[LLM:OLLAMA] requestBody={}", json);
             }
             return executeWithRetry("chat", () -> {
-                final HttpPost httpRequest = new HttpPost(url);
+                final HttpPost httpRequest = OllamaUrlUtil.createHttpPost(url, CONFIG_API_URL);
                 httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
                 try (var response = getHttpClient().execute(httpRequest)) {
                     final int statusCode = response.getCode();
@@ -185,8 +240,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
                         if (isRetryableStatus(statusCode)) {
                             throw new RetryableHttpException(statusCode, response.getReasonPhrase());
                         }
-                        logger.warn("[LLM:OLLAMA] API error. url={}, statusCode={}, message={}", url, statusCode,
-                                response.getReasonPhrase());
+                        logger.warn("[LLM:OLLAMA] API error. url={}, statusCode={}, message={}", CredentialUrlUtil.maskCredentialInUrl(url),
+                                statusCode, response.getReasonPhrase());
                         throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
                                 resolveErrorCode(statusCode));
                     }
@@ -239,20 +294,28 @@ public class OllamaLlmClient extends AbstractLlmClient {
         } catch (final LlmException e) {
             throw e;
         } catch (final Exception e) {
-            logger.warn("[LLM:OLLAMA] Failed to call Ollama API. url={}, error={}", url, e.getMessage(), e);
+            logger.warn("[LLM:OLLAMA] Failed to call Ollama API. url={}, error={}", CredentialUrlUtil.maskCredentialInUrl(url),
+                    e.getMessage(), e);
             throw new LlmException("Failed to call Ollama API", LlmException.ERROR_CONNECTION, e);
         }
     }
 
     @Override
     public void streamChat(final LlmChatRequest request, final LlmStreamCallback callback) {
-        final String url = getApiUrl() + "/api/chat";
+        final String apiUrl = getApiUrl();
+        if (isUserinfoRefused(apiUrl)) {
+            final LlmException refusal =
+                    new LlmException(OllamaUrlUtil.userinfoRejectionMessage(CONFIG_API_URL), LlmException.ERROR_CONNECTION);
+            callback.onError(refusal);
+            throw refusal;
+        }
+        final String url = OllamaUrlUtil.appendPath(apiUrl, "/api/chat");
         final Map<String, Object> requestBody = buildRequestBody(request, true);
         final long startTime = System.currentTimeMillis();
 
         if (logger.isDebugEnabled()) {
-            logger.debug("[LLM:OLLAMA] Starting streaming chat request to Ollama. url={}, model={}, messageCount={}", url,
-                    requestBody.get("model"), request.getMessages().size());
+            logger.debug("[LLM:OLLAMA] Starting streaming chat request to Ollama. url={}, model={}, messageCount={}",
+                    CredentialUrlUtil.maskCredentialInUrl(url), requestBody.get("model"), request.getMessages().size());
         }
 
         try {
@@ -261,7 +324,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 logger.debug("[LLM:OLLAMA] requestBody={}", json);
             }
             executeWithRetry("streamChat", () -> {
-                final HttpPost httpRequest = new HttpPost(url);
+                final HttpPost httpRequest = OllamaUrlUtil.createHttpPost(url, CONFIG_API_URL);
                 httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
                 try (var response = getHttpClient().execute(httpRequest)) {
                     final int statusCode = response.getCode();
@@ -269,8 +332,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
                         if (isRetryableStatus(statusCode)) {
                             throw new RetryableHttpException(statusCode, response.getReasonPhrase());
                         }
-                        logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}", url, statusCode,
-                                response.getReasonPhrase());
+                        logger.warn("[LLM:OLLAMA] Streaming API error. url={}, statusCode={}, message={}",
+                                CredentialUrlUtil.maskCredentialInUrl(url), statusCode, response.getReasonPhrase());
                         throw new LlmException("Ollama API error: " + statusCode + " " + response.getReasonPhrase(),
                                 resolveErrorCode(statusCode));
                     }
@@ -289,7 +352,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     }
 
                     if (response.getEntity() == null) {
-                        logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}", url);
+                        logger.warn("[LLM:OLLAMA] Empty response from Ollama streaming API. url={}",
+                                CredentialUrlUtil.maskCredentialInUrl(url));
                         throw new LlmException("Empty response from Ollama");
                     }
 
@@ -301,7 +365,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
             callback.onError(e);
             throw e;
         } catch (final IOException e) {
-            logger.warn("[LLM:OLLAMA] Failed to stream from Ollama API. url={}, error={}", url, e.getMessage(), e);
+            logger.warn("[LLM:OLLAMA] Failed to stream from Ollama API. url={}, error={}", CredentialUrlUtil.maskCredentialInUrl(url),
+                    e.getMessage(), e);
             final LlmException llmException = new LlmException("Failed to stream from Ollama API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
@@ -571,36 +636,22 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @return the normalized API base URL (without trailing slash or {@code /api}).
      */
     protected String getApiUrl() {
-        final String raw = ComponentUtil.getFessConfig().getOrDefault("rag.llm.ollama.api.url", "http://localhost:11434");
+        final String raw = ComponentUtil.getFessConfig().getOrDefault(CONFIG_API_URL, "http://localhost:11434");
         return normalizeApiUrl(raw);
     }
 
     /**
      * Strips a trailing {@code /} and a trailing {@code /api} segment from an Ollama base
      * URL, leaving the host root that the client can suffix with {@code /api/chat} or
-     * {@code /api/tags}. Idempotent.
+     * {@code /api/tags}, and leaving any query string or fragment in place. Idempotent.
+     * Delegates to {@link OllamaUrlUtil#normalizeBaseUrl(String)} so the two clients cannot
+     * drift apart.
      *
      * @param url the raw configured URL.
      * @return the normalized URL, or the input unchanged when blank.
      */
     static String normalizeApiUrl(final String url) {
-        if (url == null) {
-            return null;
-        }
-        String result = url.trim();
-        if (result.isEmpty()) {
-            return result;
-        }
-        while (result.endsWith("/")) {
-            result = result.substring(0, result.length() - 1);
-        }
-        if (result.endsWith("/api")) {
-            result = result.substring(0, result.length() - 4);
-        }
-        while (result.endsWith("/")) {
-            result = result.substring(0, result.length() - 1);
-        }
-        return result;
+        return OllamaUrlUtil.normalizeBaseUrl(url);
     }
 
     @Override

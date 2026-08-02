@@ -15,6 +15,8 @@
  */
 package org.codelibs.fess.llm.ollama;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -33,7 +35,11 @@ import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.ollama.OllamaUrlUtil;
+import org.codelibs.fess.unit.LogCapturingAppender;
 import org.codelibs.fess.unit.UnitFessTestCase;
+import org.codelibs.fess.util.CredentialUrlUtil;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
@@ -1579,6 +1585,490 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         }
     }
 
+    // ========== Credential masking in logged URLs ==========
+    //
+    // This plugin has no credential configuration key for Ollama, so the configured endpoint
+    // is the only place a secret can appear: rag.llm.ollama.api.url may point at a
+    // reverse-proxied Ollama, carrying the shared secret in a query parameter. Every log line
+    // that echoes the URL must route it through CredentialUrlUtil.maskCredentialInUrl. The masking
+    // semantics themselves are pinned by OllamaUrlUtilTest; these two cases prove the LLM
+    // client actually applies them on the chat and streamChat failure paths.
+    //
+    // These cases use the query-parameter form deliberately. They previously used the
+    // userinfo form because it renders unambiguously in an assertion, but a userinfo-bearing
+    // endpoint is now refused before any request is built, so that shape can no longer reach
+    // a failure WARN at all. The query-parameter form is a configuration that works, so its
+    // value really does reach a live log line - which is the only masking rule with a
+    // reachable leak behind it.
+
+    /** A proxy shared secret that must never be written to the log verbatim. */
+    private static final String QUERY_PARAM_SECRET = "s3cr3tproxykey";
+
+    @Test
+    public void test_chat_failureLog_masksCredentialsInUrl() throws Exception {
+        // Start then immediately shut down the server so the port refuses connections,
+        // driving the generic failure WARN in chat() that echoes the configured URL.
+        final MockWebServer server = new MockWebServer();
+        server.start();
+        final int port = server.getPort();
+        server.shutdown();
+
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl("http://127.0.0.1:" + port + "/?api_key=" + QUERY_PARAM_SECRET);
+        localClient.setTestModel("llama3:latest");
+        localClient.setTestRetryMax(1);
+        localClient.setTestRetryBaseDelayMs(1L);
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.chat(request);
+                fail("expected LlmException when the endpoint refuses connections");
+            } catch (final LlmException e) {
+                // expected
+            }
+            assertFalse(capture.renderedWarnings().stream().anyMatch(m -> m.contains(QUERY_PARAM_SECRET)),
+                    "no WARN, including its attached throwable, may echo the proxy secret: " + capture.renderedWarnings());
+            assertTrue(capture.warnings().stream().anyMatch(m -> m.contains("127.0.0.1:" + port) && m.contains("?api_key=***")),
+                    "the failure WARN should carry the masked URL: " + capture.warnings());
+        } finally {
+            capture.detach();
+        }
+    }
+
+    @Test
+    public void test_streamChat_failureLog_masksCredentialsInUrl() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.start();
+        final int port = server.getPort();
+        server.shutdown();
+
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl("http://127.0.0.1:" + port + "/?api_key=" + QUERY_PARAM_SECRET);
+        localClient.setTestModel("llama3:latest");
+        localClient.setTestRetryMax(1);
+        localClient.setTestRetryBaseDelayMs(1L);
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String chunk, final boolean done) {
+                        // no-op
+                    }
+
+                    @Override
+                    public void onError(final Throwable t) {
+                        // no-op
+                    }
+                });
+                fail("expected LlmException when the endpoint refuses connections");
+            } catch (final LlmException e) {
+                // expected
+            }
+            assertFalse(capture.renderedWarnings().stream().anyMatch(m -> m.contains(QUERY_PARAM_SECRET)),
+                    "no WARN, including its attached throwable, may echo the proxy secret: " + capture.renderedWarnings());
+            assertTrue(capture.warnings().stream().anyMatch(m -> m.contains("127.0.0.1:" + port) && m.contains("?api_key=***")),
+                    "the streaming failure WARN should carry the masked URL: " + capture.warnings());
+        } finally {
+            capture.detach();
+        }
+    }
+
+    // ========== Malformed endpoint URL must not leak through the exception path ==========
+    //
+    // The request URI is parsed when the request object is built (new HttpGet/HttpPost ->
+    // URI.create), and the IllegalArgumentException that a malformed URL raises quotes the
+    // offending URI in full. That string reaches the log three ways at once: the error={}
+    // argument, the throwable attached to the same WARN, and the cause chain of the
+    // exception thrown to the caller. Masking the logged url={} argument does not help,
+    // because the leak rides on the exception, not on the argument.
+    //
+    // Masking the raw URL at that point would not help either: the value is malformed
+    // precisely because it contains a character the masking pattern excludes, so the
+    // pattern no longer matches. The sanitized message must therefore omit the URL.
+
+    /** A secret that must never appear in a log line or an exception message. */
+    private static final String MALFORMED_URL_SECRET = "s3cr3tvalue";
+
+    /**
+     * A configured endpoint carrying a secret query parameter whose value contains a
+     * character that is illegal in a URI query, so building the request URI fails.
+     */
+    private static final String MALFORMED_URL_WITH_SECRET = "http://127.0.0.1:11434/?api_key=" + MALFORMED_URL_SECRET + "^x";
+
+    @Test
+    public void test_chat_malformedUrl_doesNotLeakCredential() throws Exception {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl(MALFORMED_URL_WITH_SECRET);
+        localClient.setTestModel("llama3:latest");
+        localClient.setTestRetryMax(1);
+        localClient.setTestRetryBaseDelayMs(1L);
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.chat(request);
+                fail("expected an exception when the configured endpoint cannot be parsed as a URI");
+            } catch (final RuntimeException e) {
+                assertFalse(LogCapturingAppender.renderThrowable(e).contains(MALFORMED_URL_SECRET),
+                        "the exception thrown to the caller must not carry the raw URL: " + LogCapturingAppender.renderThrowable(e));
+            }
+            assertFalse(capture.renderedWarnings().stream().anyMatch(m -> m.contains(MALFORMED_URL_SECRET)),
+                    "no WARN, including its attached throwable, may carry the raw URL: " + capture.renderedWarnings());
+        } finally {
+            capture.detach();
+        }
+    }
+
+    @Test
+    public void test_streamChat_malformedUrl_doesNotLeakCredential() throws Exception {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl(MALFORMED_URL_WITH_SECRET);
+        localClient.setTestModel("llama3:latest");
+        localClient.setTestRetryMax(1);
+        localClient.setTestRetryBaseDelayMs(1L);
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        final List<Throwable> callbackErrors = new ArrayList<>();
+        try {
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String chunk, final boolean done) {
+                        // no-op
+                    }
+
+                    @Override
+                    public void onError(final Throwable t) {
+                        callbackErrors.add(t);
+                    }
+                });
+                fail("expected an exception when the configured endpoint cannot be parsed as a URI");
+            } catch (final RuntimeException e) {
+                assertFalse(LogCapturingAppender.renderThrowable(e).contains(MALFORMED_URL_SECRET),
+                        "the exception thrown to the caller must not carry the raw URL: " + LogCapturingAppender.renderThrowable(e));
+            }
+            for (final Throwable t : callbackErrors) {
+                assertFalse(LogCapturingAppender.renderThrowable(t).contains(MALFORMED_URL_SECRET),
+                        "the throwable handed to the stream callback must not carry the raw URL: "
+                                + LogCapturingAppender.renderThrowable(t));
+            }
+            assertFalse(capture.renderedWarnings().stream().anyMatch(m -> m.contains(MALFORMED_URL_SECRET)),
+                    "no WARN, including its attached throwable, may carry the raw URL: " + capture.renderedWarnings());
+        } finally {
+            capture.detach();
+        }
+    }
+
+    // ========== A userinfo-bearing api.url is refused up front ==========
+    //
+    // RFC 9110 section 4.2.4 forbids a sender from generating the userinfo subcomponent in an
+    // http/https target URI, and httpclient5 enforces that unconditionally: ProtocolExec
+    // throws "Request URI authority contains deprecated userinfo component" with no setting
+    // that disables it. A userinfo-bearing api.url can therefore never issue a request, no
+    // matter what else is configured. Ollama does not authenticate at all, and the one
+    // legitimate case - an endpoint behind an authenticating proxy - is already served by
+    // http.proxy.host/.port/.username/.password. The value is an operator error with a
+    // supported alternative, so the client names the remedy instead of failing opaquely at
+    // execute time.
+    //
+    // The refusal FAILS CLOSED on the availability path rather than throwing:
+    // checkAvailabilityNow() is reached synchronously from init()
+    // (startAvailabilityCheck -> updateAvailability -> checkAvailabilityNow), and init() is
+    // the DI container's eager init method, so a throw there would abort container start-up.
+    // test_init_userinfoUrl_doesNotThrow pins that.
+
+    /** A password that must appear in no log line, no exception message, and no cause chain. */
+    private static final String USERINFO_PASSWORD = "s3cr3tpassword";
+
+    /** An endpoint carrying credentials in its authority, the shape this change refuses. */
+    private static final String USERINFO_API_URL = "http://ollama:" + USERINFO_PASSWORD + "@ollama.internal:11434";
+
+    /**
+     * The input class the masking regex was already shown to be defeated by: whitespace
+     * inside the credential. Detection must be structural, so this must be caught too.
+     */
+    private static final String SPACED_USERINFO_PASSWORD = "s3cr3t password";
+
+    private static final String SPACED_USERINFO_API_URL = "http://ollama:" + SPACED_USERINFO_PASSWORD + "@ollama.internal:11434";
+
+    @Test
+    public void test_checkAvailabilityNow_userinfoUrl_reportsUnavailableAndNamesRemedy() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl(USERINFO_API_URL);
+        localClient.setTestModel("llama3:latest");
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            assertFalse(localClient.checkAvailabilityNow(), "a userinfo-bearing api.url must report the client unavailable");
+
+            final List<String> errors = capture.renderedAt(Level.ERROR);
+            assertTrue(errors.size() == 1, "exactly one ERROR should name the misconfiguration: " + errors);
+            final String error = errors.get(0);
+            assertTrue(error.contains("rag.llm.ollama.api.url"), "the ERROR must name the offending config key: " + error);
+            assertTrue(error.contains("http.proxy.username"), "the ERROR must name the supported alternative: " + error);
+            assertTrue(error.contains("http.proxy.password"), "the ERROR must name the supported alternative: " + error);
+            assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
+        } finally {
+            capture.detach();
+            localClient.destroy();
+        }
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_userinfoUrl_errorFiresOnceNotPerCall() {
+        // The availability check runs on a timer, so a per-call ERROR would flood the log
+        // once a minute for as long as the misconfiguration stands.
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl(USERINFO_API_URL);
+        localClient.setTestModel("llama3:latest");
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            localClient.checkAvailabilityNow();
+            localClient.checkAvailabilityNow();
+            localClient.checkAvailabilityNow();
+
+            final List<String> errors = capture.renderedAt(Level.ERROR);
+            assertTrue(errors.size() == 1, "three checks must produce one ERROR, not three: " + errors);
+        } finally {
+            capture.detach();
+            localClient.destroy();
+        }
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_userinfoWithWhitespace_isDetectedStructurally() {
+        // Precondition: this is exactly the input the masking regex cannot see, so a
+        // detection built by reusing that regex would let this configuration through.
+        assertEquals(SPACED_USERINFO_API_URL, CredentialUrlUtil.maskCredentialInUrl(SPACED_USERINFO_API_URL));
+
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl(SPACED_USERINFO_API_URL);
+        localClient.setTestModel("llama3:latest");
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            assertFalse(localClient.checkAvailabilityNow(), "a whitespace-bearing userinfo must be refused just the same");
+            assertTrue(capture.renderedAt(Level.ERROR).size() == 1,
+                    "the refusal ERROR must fire for this input too: " + capture.renderedAt(Level.ERROR));
+            assertNoCapturedEventCarries(capture, SPACED_USERINFO_PASSWORD);
+        } finally {
+            capture.detach();
+            localClient.destroy();
+        }
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_ordinaryHostPortUrl_isUnaffected() {
+        // Negative control: a host:port colon is not a credential separator. MockWebServer
+        // serves on http://127.0.0.1:<port>, the same shape as http://ollama.internal:11434.
+        final MockWebServer server = new MockWebServer();
+        try {
+            server.enqueue(new MockResponse().setBody("{\"models\":[{\"name\":\"llama3:latest\"}]}"));
+            server.start();
+
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            localClient.setTestModel("llama3:latest");
+            localClient.initHttpClient();
+
+            final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+            try {
+                assertTrue(localClient.checkAvailabilityNow(), "a plain host:port endpoint must still be reachable");
+                assertTrue(capture.renderedAt(Level.ERROR).isEmpty(),
+                        "no refusal ERROR may fire for a credential-free endpoint: " + capture.renderedAt(Level.ERROR));
+            } finally {
+                capture.detach();
+                localClient.destroy();
+            }
+        } catch (final Exception e) {
+            throw new IllegalStateException(e);
+        } finally {
+            try {
+                server.shutdown();
+            } catch (final Exception e) {
+                // ignore
+            }
+        }
+    }
+
+    @Test
+    public void test_chat_userinfoUrl_refusedWithRemedy() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl(USERINFO_API_URL);
+        localClient.setTestModel("llama3:latest");
+        localClient.setTestRetryMax(1);
+        localClient.setTestRetryBaseDelayMs(1L);
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.chat(request);
+                fail("expected the configured userinfo endpoint to be refused");
+            } catch (final LlmException e) {
+                assertTrue(e.getMessage().contains("http.proxy.username"), "the failure must name the supported alternative: " + e);
+                assertFalse(LogCapturingAppender.renderThrowable(e).contains(USERINFO_PASSWORD),
+                        "no part of the thrown exception or its cause chain may carry the credential: "
+                                + LogCapturingAppender.renderThrowable(e));
+            }
+            assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
+        } finally {
+            capture.detach();
+            localClient.destroy();
+        }
+    }
+
+    @Test
+    public void test_streamChat_userinfoUrl_refusedWithRemedy() {
+        final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+        localClient.setTestApiUrl(USERINFO_API_URL);
+        localClient.setTestModel("llama3:latest");
+        localClient.setTestRetryMax(1);
+        localClient.setTestRetryBaseDelayMs(1L);
+        localClient.initHttpClient();
+
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        final List<Throwable> callbackErrors = new ArrayList<>();
+        try {
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String chunk, final boolean done) {
+                        // no-op
+                    }
+
+                    @Override
+                    public void onError(final Throwable t) {
+                        callbackErrors.add(t);
+                    }
+                });
+                fail("expected the configured userinfo endpoint to be refused");
+            } catch (final LlmException e) {
+                assertTrue(e.getMessage().contains("http.proxy.username"), "the failure must name the supported alternative: " + e);
+            }
+            assertTrue(callbackErrors.size() == 1, "the stream callback must be told once: " + callbackErrors);
+            for (final Throwable t : callbackErrors) {
+                assertFalse(LogCapturingAppender.renderThrowable(t).contains(USERINFO_PASSWORD),
+                        "the throwable handed to the stream callback must not carry the credential: "
+                                + LogCapturingAppender.renderThrowable(t));
+            }
+            assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
+        } finally {
+            capture.detach();
+            localClient.destroy();
+        }
+    }
+
+    @Test
+    public void test_init_userinfoUrl_doesNotThrow() {
+        // The design constraint: init() is the container's eager init method and reaches
+        // checkAvailabilityNow() synchronously, so refusing the value must not escape as a
+        // throw. This probe leaves the production init() body untouched and only pins the
+        // seams that decide whether the availability check actually runs.
+        final AvailabilityProbeClient probe = new AvailabilityProbeClient(USERINFO_API_URL);
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaLlmClient.class);
+        try {
+            probe.init();
+
+            assertFalse(probe.isAvailable(), "the refused client must report unavailable, not available");
+            assertTrue(capture.renderedAt(Level.ERROR).size() == 1,
+                    "init() must surface the misconfiguration exactly once: " + capture.renderedAt(Level.ERROR));
+            assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
+        } catch (final RuntimeException e) {
+            throw new AssertionError("init() must not throw for a userinfo-bearing api.url: " + e, e);
+        } finally {
+            capture.detach();
+            probe.destroy();
+        }
+    }
+
+    /**
+     * Asserts that {@code secret} appears in no captured event at any level, including the
+     * rendered stack trace of any attached throwable. Message-only assertions go green while
+     * the rendered log still leaks through a cause.
+     *
+     * @param capture the attached appender.
+     * @param secret the value that must not appear.
+     */
+    private static void assertNoCapturedEventCarries(final LogCapturingAppender capture, final String secret) {
+        for (final Level level : List.of(Level.ERROR, Level.WARN, Level.INFO, Level.DEBUG)) {
+            final List<String> rendered = capture.renderedAt(level);
+            Assertions.assertFalse(rendered.stream().anyMatch(m -> m.contains(secret)),
+                    "no " + level + " event may carry the credential: " + rendered);
+        }
+    }
+
+    /**
+     * A real {@link OllamaLlmClient} with only the seams that gate {@code init()}'s
+     * availability check pinned, so the production {@code init()} body runs untouched.
+     */
+    static class AvailabilityProbeClient extends OllamaLlmClient {
+
+        private final String apiUrl;
+
+        AvailabilityProbeClient(final String apiUrl) {
+            this.apiUrl = apiUrl;
+        }
+
+        @Override
+        protected String getApiUrl() {
+            return apiUrl;
+        }
+
+        @Override
+        protected String getModel() {
+            return "llama3:latest";
+        }
+
+        @Override
+        protected String getLlmType() {
+            return "ollama";
+        }
+
+        @Override
+        protected boolean isRagChatEnabled() {
+            return true;
+        }
+
+        @Override
+        protected int getAvailabilityCheckInterval() {
+            return 3600;
+        }
+
+        @Override
+        protected int getTimeout() {
+            return 1000;
+        }
+
+        @Override
+        protected int getConnectTimeout() {
+            return 1000;
+        }
+    }
+
     // --- Testable subclass ---
 
     static class TestableOllamaLlmClient extends OllamaLlmClient {
@@ -1730,58 +2220,4 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
         }
     }
 
-    /**
-     * Test helper that captures Log4j2 events emitted by a target class so tests can
-     * assert on log output. Attach via {@link #attach(Class)}, query via
-     * {@link #messagesAt(org.apache.logging.log4j.Level)} or convenience methods, and
-     * always {@link #detach()} in a finally block. Not safe for parallel test
-     * execution — capture is on the global Log4j2 logger registry.
-     */
-    static final class LogCapturingAppender extends AbstractAppender {
-        private final List<LogEvent> events = new CopyOnWriteArrayList<>();
-        private final Logger boundLogger;
-
-        private LogCapturingAppender(final Logger logger) {
-            super("LogCapturingAppender-" + UUID.randomUUID(), null, null, true, Property.EMPTY_ARRAY);
-            this.boundLogger = logger;
-        }
-
-        static LogCapturingAppender attach(final Class<?> targetClass) {
-            final Logger logger = (Logger) LogManager.getLogger(targetClass);
-            final LogCapturingAppender appender = new LogCapturingAppender(logger);
-            appender.start();
-            logger.addAppender(appender);
-            return appender;
-        }
-
-        void detach() {
-            boundLogger.removeAppender(this);
-            stop();
-        }
-
-        @Override
-        public void append(final LogEvent event) {
-            events.add(event.toImmutable());
-        }
-
-        List<String> messagesAt(final Level level) {
-            return events.stream().filter(e -> e.getLevel() == level).map(e -> e.getMessage().getFormattedMessage()).toList();
-        }
-
-        List<String> warnings() {
-            return messagesAt(Level.WARN);
-        }
-
-        List<String> infos() {
-            return messagesAt(Level.INFO);
-        }
-
-        List<String> errors() {
-            return messagesAt(Level.ERROR);
-        }
-
-        List<String> debugs() {
-            return messagesAt(Level.DEBUG);
-        }
-    }
 }

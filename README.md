@@ -25,13 +25,25 @@ For detailed instructions, see the [Plugin Administration Guide](https://fess.co
 
 ## Configuration
 
-Configure the following properties in `fess_config.properties`:
+This plugin's properties are split across Fess's two independent configuration channels;
+each subsection below states which one applies. Read the channel note before editing a
+property — setting it in the wrong file is a silent no-op.
+
+`rag.llm.name` selects which registered LLM client Fess's RAG feature uses, and belongs in
+**`conf/system.properties`** (or a `-Dfess.system.rag.llm.name` JVM argument) — not
+`fess_config.properties`. Set it to `ollama` to activate this plugin:
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `rag.llm.name` | - | Set to `ollama` to use this plugin |
+| `rag.llm.name` | - | Set to `ollama` to use this plugin. Read from `conf/system.properties`, not `fess_config.properties`. |
+
+Configure the following properties in `fess_config.properties` (the LastaFlute config store,
+loaded once at container boot; changes require a Fess restart):
+
+| Property | Default | Description |
+|----------|---------|-------------|
 | `rag.chat.enabled` | `false` | Enable RAG chat feature |
-| `rag.llm.ollama.api.url` | `http://localhost:11434` | Ollama server root URL. The plugin appends `/api/chat` and `/api/tags`, so a trailing `/` or `/api` (the form shown in the Ollama docs, e.g. `http://localhost:11434/api` or `https://ollama.com/api`) is stripped automatically. |
+| `rag.llm.ollama.api.url` | `http://localhost:11434` | Ollama server root URL. The plugin appends `/api/chat` and `/api/tags`, so a trailing `/` or `/api` (the form shown in the Ollama docs, e.g. `http://localhost:11434/api` or `https://ollama.com/api`) is stripped automatically. A query string is preserved and stays behind the appended path, so an endpoint such as `http://gateway/ollama?api_key=...` becomes `http://gateway/ollama/api/chat?api_key=...`. |
 | `rag.llm.ollama.answer.context.max.chars` | `10000` | Maximum characters for document context in answer generation |
 | `rag.llm.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability |
 | `rag.llm.ollama.chat.evaluation.max.relevant.docs` | `3` | Maximum number of relevant documents for evaluation |
@@ -45,6 +57,61 @@ Configure the following properties in `fess_config.properties`:
 | `rag.llm.ollama.retry.max` | `3` | Maximum total attempts on retryable HTTP errors (429/500/502/503/504) and connect-time IOExceptions. |
 | `rag.llm.ollama.summary.context.max.chars` | `10000` | Maximum characters for document context in summary generation |
 | `rag.llm.ollama.timeout` | `60000` | Response/read timeout (ms). For TCP connect timeout see `rag.llm.ollama.connect.timeout`. |
+
+### Content Chunk Embedding
+
+When Fess's content-chunking RAG feature (`content_chunker.enabled=true`) is configured to use
+this plugin as its embedding provider (`content_chunker.embedding.name=ollama`), the following
+properties configure `OllamaEmbeddingClient`, which calls Ollama's `POST /api/embed` endpoint.
+
+**Every `content_chunker.embedding.ollama.*` property below belongs in
+`conf/system.properties`** (or as a `-Dfess.system.<key>` JVM argument) — the same channel
+every other `content_chunker.*` setting uses, admin-visible read-only under System Info >
+Config Info > App Properties. Setting one of these in `fess_config.properties` instead has no
+effect.
+
+Most of these properties are read on every call, so an edit takes effect without a Fess
+restart. The exceptions are `timeout`, `connect.timeout`, and `availability.check.interval`,
+which are read once when the embedding client initializes and require a restart to pick up a
+change.
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `content_chunker.embedding.ollama.api.url` | `http://localhost:11434` | Ollama server root URL. Same handling as `rag.llm.ollama.api.url` (trailing `/` or `/api` stripped, query string preserved behind the appended path). |
+| `content_chunker.embedding.ollama.model` | `embeddinggemma` | Embedding model name. The default is multilingual; `nomic-embed-text` is English-only and separates non-English documents poorly. Change `document.prefix` and `query.prefix` together with this key -- see the note below the table. |
+| `content_chunker.embedding.ollama.document.prefix` | `title: none \| text: ` | Task prefix prepended to document/chunk texts before embedding, per the `embeddinggemma` convention. Replace `none` with the document's own title if you have one. Set to an empty string to disable for models that don't use task prefixes. |
+| `content_chunker.embedding.ollama.query.prefix` | `task: search result \| query: ` | Task prefix prepended to query texts before embedding, per the `embeddinggemma` convention. Set to an empty string to disable for models that don't use task prefixes. |
+| `content_chunker.embedding.ollama.truncate` | `true` | Sent explicitly as the `truncate` field of every `/api/embed` request. `true` (Ollama's own default) silently cuts an over-context chunk down to fit and still returns a valid vector, so the relevance loss is invisible; `false` makes Ollama reject the input instead, so the chunk fails loudly rather than being indexed with a degraded vector. Chunk size is governed by `content_chunker.length.chunk_size`. An unparseable value keeps `true` and logs a WARN. |
+| `content_chunker.embedding.ollama.timeout` | `60000` | Response/read timeout (ms). |
+| `content_chunker.embedding.ollama.connect.timeout` | `5000` | TCP connect timeout (ms). Separate from `timeout` (read/response). |
+| `content_chunker.embedding.ollama.availability.check.interval` | `60` | Interval (seconds) for checking Ollama server availability. |
+| `content_chunker.embedding.ollama.retry.max` | `3` | Maximum total attempts on retryable HTTP errors (429/500/502/503/504) and connect-time IOExceptions. |
+| `content_chunker.embedding.ollama.retry.base.delay.ms` | `2000` | Base delay (ms) for exponential backoff with ±20% jitter. |
+
+Also requires the shared `content_chunker.embedding.dimension` property (embedding vector
+dimension, also read from `conf/system.properties`) to be set, independent of this plugin.
+The default model emits 768-dimensional vectors, so `content_chunker.embedding.dimension=768`.
+
+#### Choosing a model, and the task prefixes that go with it
+
+Embedding models are trained with their own task prefixes, and a prefix belonging to a
+different model family still produces well-formed vectors of the correct dimension — nothing
+fails, only relevance degrades. So `model`, `document.prefix` and `query.prefix` must be
+changed together. The plugin logs a WARN at startup when they disagree.
+
+| Model | `document.prefix` | `query.prefix` |
+|-------|-------------------|----------------|
+| `embeddinggemma` (default, 768, multilingual) | `title: none \| text: ` | `task: search result \| query: ` |
+| `nomic-embed-text` (768, English) | `search_document: ` | `search_query: ` |
+| anything else | empty, unless the model documents its own | empty |
+
+`nomic-embed-text` is trained on English. Measured on a 14-document Japanese corpus, every
+document scored between 0.76 and 0.83 for a paraphrase query and the expected document ranked
+last; `embeddinggemma` ranked the same document first on the same corpus. Both emit
+768-dimensional vectors, so switching between them costs a re-index and no mapping change.
+
+Changing the model requires re-running the chunk-vector job over the whole index: vectors
+already stored were produced by the previous model and are not comparable with the new one.
 
 ### Recommended num_ctx Setting
 
