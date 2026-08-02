@@ -171,4 +171,9 @@
 + "{{languageInstruction}}"
 		</property>
 	</component>
+	<component name="ollamaEmbeddingClient" class="org.codelibs.fess.embedding.ollama.OllamaEmbeddingClient">
+		<postConstruct name="register"/>
+		<postConstruct name="init"/>
+		<preDestroy name="destroy"/>
+	</component>
 </components>
