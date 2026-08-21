@@ -24,6 +24,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
@@ -44,6 +45,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 /**
  * Embedding client implementation for Ollama.
  * Calls Ollama's {@code POST /api/embed} endpoint.
+ *
+ * <p>{@link #embedDocuments(List)} and {@link #embedQuery(List)} differ in the text prefix they
+ * apply (see {@link #getDocumentPrefix()} / {@link #getQueryPrefix()}), which is how the
+ * asymmetric-embedding models this client targets are told which side of a retrieval pair the
+ * text belongs to.
+ *
+ * <p>They also differ in what the text is allowed to contain: a query reaching
+ * {@link #embedQuery(List)} on the RAG path is a Fess query string built by the LLM's intent
+ * step, so its query syntax is stripped first (see {@link #toPlainQuery(String)}). Document text
+ * is embedded exactly as given, prefix aside.
  *
  * @see <a href="https://ollama.ai/">Ollama</a>
  */
@@ -74,6 +85,36 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
      * sub-batches of at most this size and their vectors concatenated in order.
      */
     private static final int MAX_BATCH_ITEMS = 128;
+
+    /**
+     * A {@code +} or {@code -} that begins a term. Mid-token both are ordinary characters
+     * ({@code nomic-embed-text}, {@code C++}), so the match is anchored to the start
+     * of the string or to whitespace and the whitespace itself is preserved.
+     */
+    private static final Pattern QUERY_TERM_PREFIX = Pattern.compile("(^|\\s)[+\\-](?=\\S)");
+
+    /**
+     * A field restriction such as {@code title:}. The field name is a schema name rather than
+     * something the user asked about, so it is removed with its colon instead of being left
+     * behind as a term. Deliberately ASCII-only ({@code \w}), which is what Fess field names are.
+     */
+    private static final Pattern QUERY_FIELD_PREFIX = Pattern.compile("\\b\\w+:");
+
+    /**
+     * A boost ({@code ^2}) or fuzzy/proximity ({@code ~1}) marker together with its number.
+     * Removed as a unit: dropping only the {@code ^} of {@code "Fess"^2} would glue the boost
+     * factor onto the term and embed {@code Fess2}.
+     */
+    private static final Pattern QUERY_BOOST_OR_FUZZY = Pattern.compile("[\\^~]\\d*(?:\\.\\d+)?");
+
+    /** Grouping, phrase, range and wildcard markup, plus the two-character boolean operators. */
+    private static final Pattern QUERY_SYNTAX_CHARS = Pattern.compile("[\"()\\[\\]{}*?\\\\]|&&|\\|\\|");
+
+    /** Boolean and range keywords, which Lucene reads as operators rather than as terms. */
+    private static final Pattern QUERY_KEYWORDS = Pattern.compile("\\b(?:AND|OR|NOT|TO)\\b");
+
+    /** Collapses the gaps left where markup was removed. */
+    private static final Pattern WHITESPACE_RUN = Pattern.compile("\\s+");
 
     private static final String CONFIG_RETRY_MAX = "retry.max";
     private static final String CONFIG_RETRY_BASE_DELAY_MS = "retry.base.delay.ms";
@@ -231,9 +272,90 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
         return embedInSubBatches("embedDocuments", applyPrefix(texts, getDocumentPrefix()));
     }
 
+    /**
+     * Generates embedding vectors for the given query texts, with Fess/Lucene query syntax
+     * removed before the query prefix is applied (see {@link #toPlainQuery(String)}).
+     *
+     * <p>The order matters and is not interchangeable. {@link #getQueryPrefix()} defaults to
+     * {@code "task: search result | query: "}, and the {@code nomic-embed} convention is
+     * {@code "search_query: "} - both of which {@link #QUERY_FIELD_PREFIX} matches. Stripping
+     * after prefixing would therefore eat the prefix itself: {@code "search_query: "} disappears
+     * entirely, and {@code "task: search result | query: "} degrades to
+     * {@code "search result | "}. The model would then be told nothing about which side of the
+     * retrieval pair the text is, and the only symptom would be quietly worse recall.
+     *
+     * @param texts the query texts to embed, in order
+     * @return the list of vectors, one per input text, in the same order
+     * @throws EmbeddingException if the provider call fails or returns an unusable response
+     */
     @Override
     public List<float[]> embedQuery(final List<String> texts) {
-        return embedInSubBatches("embedQuery", applyPrefix(texts, getQueryPrefix()));
+        return embedInSubBatches("embedQuery", applyPrefix(toPlainQueries(texts), getQueryPrefix()));
+    }
+
+    /**
+     * Applies {@link #toPlainQuery(String)} to each text, logging the ones it changed.
+     *
+     * @param texts the query texts, may be null or empty
+     * @return a list of normalized texts in input order, or {@code texts} itself when there is
+     *         nothing to do
+     */
+    private List<String> toPlainQueries(final List<String> texts) {
+        if (texts == null || texts.isEmpty()) {
+            return texts;
+        }
+        final List<String> plainTexts = new ArrayList<>(texts.size());
+        for (final String text : texts) {
+            final String plain = toPlainQuery(text);
+            if (logger.isDebugEnabled() && plain != null && !plain.equals(text)) {
+                logger.debug("[Embedding:OLLAMA] Removed query syntax before embedding. from={}, to={}", text, plain);
+            }
+            plainTexts.add(plain);
+        }
+        return plainTexts;
+    }
+
+    /**
+     * Removes Fess/Lucene query syntax so what gets embedded is the terms the user asked about.
+     *
+     * <p>On the RAG path fess core embeds the query the LLM's intent step produced, and this
+     * plugin's own {@code intentDetectionPrompt} instructs that step to emit Fess syntax
+     * ({@code +required}, {@code (a OR b)}, {@code title:"x"^2}, quoted phrases). Those
+     * operators are not words: embedded verbatim they are noise in the vector, and the chunks
+     * chosen for the answer prompt are ranked against that vector.
+     *
+     * <p><b>Scope.</b> In fess 15.8.0 exactly two call sites reach {@code embedQuery}.
+     * {@code SemanticChunkSearcher#search} calls it only after its own {@code isPlainQuery()}
+     * returned true, and every construct removed here is one that
+     * {@code SemanticChunkSearcher.QUERY_SYNTAX_PATTERN} already rejects - so for that call site
+     * this method is the identity and the semantic branch embeds exactly what it embedded
+     * before. The behaviour therefore changes only on the other call site,
+     * {@code DefaultChatContentFetcher#resolveQueryVector}, which is the one that needs it.
+     *
+     * <p>A string that survives unchanged is returned as-is, whitespace included, so the
+     * identity above is exact rather than approximate. A string left empty by the removals -
+     * a query made only of operators - falls back to the original, because embedding a bare
+     * prefix with no query after it is worse than embedding the operators.
+     *
+     * @param text the query text, may be null
+     * @return the text with query syntax removed, or the original text if nothing was removed
+     *         or nothing would remain
+     */
+    protected String toPlainQuery(final String text) {
+        if (StringUtil.isBlank(text)) {
+            return text;
+        }
+        String work = QUERY_TERM_PREFIX.matcher(text).replaceAll("$1");
+        work = QUERY_FIELD_PREFIX.matcher(work).replaceAll(StringUtil.EMPTY);
+        work = QUERY_BOOST_OR_FUZZY.matcher(work).replaceAll(StringUtil.EMPTY);
+        // Replaced with a space, not with nothing: "(a)(b)" must not become the single term "ab".
+        work = QUERY_SYNTAX_CHARS.matcher(work).replaceAll(" ");
+        work = QUERY_KEYWORDS.matcher(work).replaceAll(StringUtil.EMPTY);
+        if (work.equals(text)) {
+            return text;
+        }
+        final String plain = WHITESPACE_RUN.matcher(work).replaceAll(" ").trim();
+        return plain.isEmpty() ? text : plain;
     }
 
     /**
