@@ -151,14 +151,14 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
             client.setTestDimension(3);
             client.initHttpClient();
 
-            final List<float[]> result = client.embedQuery(List.of("what is fess?"));
+            final List<float[]> result = client.embedQuery(List.of("what is fess"));
 
             assertEquals(1, result.size());
             assertEquals(3, result.get(0).length);
 
             final RecordedRequest recordedRequest = server.takeRequest();
             final String body = recordedRequest.getBody().readUtf8();
-            assertTrue(body.contains("task: search result | query: what is fess?"),
+            assertTrue(body.contains("task: search result | query: what is fess"),
                     "request body should carry the query-prefixed input: " + body);
         } finally {
             server.shutdown();
@@ -204,11 +204,11 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
             client.setTestQueryPrefix("");
             client.initHttpClient();
 
-            client.embedQuery(List.of("what is fess?"));
+            client.embedQuery(List.of("what is fess"));
 
             final RecordedRequest recordedRequest = server.takeRequest();
             final String body = recordedRequest.getBody().readUtf8();
-            assertTrue(body.contains("\"input\":[\"what is fess?\"]"), "request body should carry the unprefixed input: " + body);
+            assertTrue(body.contains("\"input\":[\"what is fess\"]"), "request body should carry the unprefixed input: " + body);
             assertFalse(body.contains("search_query:"), "request body should not carry the query prefix: " + body);
         } finally {
             server.shutdown();
@@ -263,7 +263,7 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
             client.setTestDimension(3);
             client.initHttpClient();
 
-            client.embedQuery(List.of("what is fess?"));
+            client.embedQuery(List.of("what is fess"));
 
             final RecordedRequest recordedRequest = server.takeRequest();
             final String body = recordedRequest.getBody().readUtf8();

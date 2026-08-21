@@ -113,6 +113,19 @@ last; `embeddinggemma` ranked the same document first on the same corpus. Both e
 Changing the model requires re-running the chunk-vector job over the whole index: vectors
 already stored were produced by the previous model and are not comparable with the new one.
 
+#### Query normalization
+
+`embedQuery()` strips Fess/Lucene query syntax — `+required` terms, `(a OR b)` groups,
+`title:"x"^2` field boosts, quoted phrases, `?`/`*` wildcards — before embedding, because on the
+RAG path the string it receives is a Fess query built by the LLM's intent step and those operators
+are markup rather than words. `embedDocuments()` strips nothing: document text is prose whose
+punctuation is content. A query left empty by the removals is embedded unchanged.
+
+The stripping happens **before** `query.prefix` is prepended, and the order is not
+interchangeable: both shipped prefixes end in a `word:` sequence, which is itself one of the
+patterns removed. Normalizing afterwards would eat the prefix — `search_query: ` would vanish
+outright — and the model would lose the task hint with no error to show for it.
+
 ### Recommended num_ctx Setting
 
 For `gemma4:e4b` with 16GB GPU, set:

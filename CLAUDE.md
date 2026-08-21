@@ -31,6 +31,15 @@ Code formatting is enforced by `formatter-maven-plugin` and license headers by `
 ## Architecture
 
 - `OllamaLlmClient` — the only production class. Extends `AbstractLlmClient` (from `fess` core, provided scope). Implements `chat()`, `streamChat()`, and `checkAvailabilityNow()`. Configuration is read from `fess_config.properties` via `ComponentUtil.getFessConfig()` with prefix `rag.llm.ollama.*`. `getApiUrl()` normalizes the configured URL by stripping a trailing `/api` segment and trailing slash, so that `http://localhost:11434`, `http://localhost:11434/`, and `http://localhost:11434/api` (the form shown in the official Ollama docs) all resolve to the same base.
+- `OllamaEmbeddingClient` — implements `AbstractEmbeddingClient` for the content-chunk embedding
+  SPI, prefix `content_chunker.embedding.ollama.*`. `embedQuery()` runs its texts through
+  `toPlainQuery()` (removes Fess/Lucene query syntax) **before** `applyPrefix` prepends
+  `query.prefix`; `embedDocuments()` only prefixes. The order is load-bearing — both shipped
+  query prefixes (`task: search result | query: `, `search_query: `) match the `\b\w+:` pattern
+  `toPlainQuery` removes, so normalizing after prefixing would delete the prefix and degrade
+  recall silently. `OllamaEmbeddingClientQueryTest#test_embedQuery_stripsBeforeApplyingTheQueryPrefix`
+  pins it; the sibling `fess-llm-openai` (PR #25) and `fess-llm-gemini` (PR #26) carry the same
+  `toPlainQuery` contract, so keep the three in step.
 - Ollama-specific parameter mapping: `temperature` → `temperature`, `maxTokens` → `num_predict`, `top_p`/`top_k`/`num_ctx` via extra params. Global options from `rag.llm.ollama.options.*` system properties.
 - Per-prompt-type config supports fallback to `rag.llm.ollama.default.*` keys.
 - HTTP via Apache HttpClient 5. Streaming uses NDJSON line-by-line parsing.
