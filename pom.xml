@@ -4,12 +4,12 @@
 	<artifactId>fess-llm-ollama</artifactId>
 	<packaging>jar</packaging>
 	<name>Ollama LLM Plugin</name>
-	<version>15.8.0</version>
+	<version>15.8.1-SNAPSHOT</version>
 	<scm>
 		<connection>scm:git:git@github.com:codelibs/fess-llm-ollama.git</connection>
 		<developerConnection>scm:git:git@github.com:codelibs/fess-llm-ollama.git</developerConnection>
 		<url>https://github.com/codelibs/fess-llm-ollama</url>
-	  <tag>fess-llm-ollama-15.8.0</tag>
+	  <tag>HEAD</tag>
   </scm>
 	<parent>
 		<groupId>org.codelibs.fess</groupId>
