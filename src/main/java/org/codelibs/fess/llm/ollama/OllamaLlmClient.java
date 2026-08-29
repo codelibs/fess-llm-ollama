@@ -54,8 +54,8 @@ import org.codelibs.fess.ollama.OllamaUrlUtil;
 import org.codelibs.fess.util.CredentialUrlUtil;
 import org.codelibs.fess.util.ComponentUtil;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
 
 /**
  * LLM client implementation for Ollama.
@@ -442,7 +442,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                         evalCount = jsonNode.path("eval_count").asInt(0);
                         break;
                     }
-                } catch (final JsonProcessingException e) {
+                } catch (final JacksonException e) {
                     parseErrorCount++;
                     logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
                 }
