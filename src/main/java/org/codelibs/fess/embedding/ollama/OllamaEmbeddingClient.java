@@ -39,8 +39,9 @@ import org.codelibs.fess.embedding.EmbeddingException;
 import org.codelibs.fess.ollama.OllamaUrlUtil;
 import org.codelibs.fess.util.CredentialUrlUtil;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Embedding client implementation for Ollama.
@@ -490,7 +491,7 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
         final JsonNode jsonNode;
         try {
             jsonNode = objectMapper.readTree(responseBody);
-        } catch (final IOException e) {
+        } catch (final JacksonException e) {
             throw new EmbeddingException("Failed to parse Ollama embed response", e);
         }
         final JsonNode embeddingsNode = jsonNode.path("embeddings");
