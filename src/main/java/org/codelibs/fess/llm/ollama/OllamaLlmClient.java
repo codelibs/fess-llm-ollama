@@ -18,6 +18,7 @@ package org.codelibs.fess.llm.ollama;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
@@ -29,6 +30,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import org.apache.hc.client5.http.ConnectTimeoutException;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.client5.http.config.ConnectionConfig;
@@ -1035,7 +1037,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
 
     /**
      * Executes {@code call} with retry on {@link RetryableHttpException} and on transient
-     * connect-time {@link IOException}s. {@link LlmException} (RuntimeException) is NOT
+     * connect-time {@link IOException}s. A read timeout is not retried (see
+     * {@link #isReadTimeout(IOException)}). {@link LlmException} (RuntimeException) is NOT
      * caught here and propagates immediately. Backoff is exponential
      * ({@code base * 2^(attempt-1)}) with +/-20% jitter via {@link ThreadLocalRandom}.
      *
@@ -1080,7 +1083,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 }
                 sleepBackoff(operation, attempt, maxAttempts, baseDelay, "status", e.statusCode, callback, e);
             } catch (final IOException e) {
-                if (attempt == maxAttempts) {
+                if (attempt == maxAttempts || isReadTimeout(e)) {
                     lastIo = e;
                     break;
                 }
@@ -1091,6 +1094,21 @@ public class OllamaLlmClient extends AbstractLlmClient {
             throw new IllegalStateException("executeWithRetry exited without exception or success");
         }
         throw lastIo;
+    }
+
+    /**
+     * Returns whether {@code e} is a response (read) timeout: Ollama accepted the request and did
+     * not answer within {@code rag.llm.ollama.timeout}. It is not retried, because another attempt
+     * waits that long again; a model that never answers would otherwise hold the caller for the
+     * timeout multiplied by the attempt budget, once for every LLM call a chat request makes.
+     * HttpClient reports a connect timeout as {@link ConnectTimeoutException}, which also extends
+     * {@link SocketTimeoutException}; that request never reached Ollama, so it stays retryable.
+     *
+     * @param e the I/O failure of an attempt.
+     * @return {@code true} when the failure is a read timeout.
+     */
+    static boolean isReadTimeout(final IOException e) {
+        return e instanceof SocketTimeoutException && !(e instanceof ConnectTimeoutException);
     }
 
     /**

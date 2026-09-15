@@ -46,6 +46,7 @@ import org.junit.jupiter.api.TestInfo;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
 
 public class OllamaLlmClientTest extends UnitFessTestCase {
 
@@ -1471,6 +1472,63 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
             final LlmChatResponse response = localClient.chat(request);
             assertEquals("ok", response.getContent());
             assertEquals(2, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_doesNotRetryReadTimeout() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        // Ollama accepts every request and never answers; a retry would be recorded as a second request.
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        }
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
+            localClient.setTestTimeout(500);
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.chat(request);
+                fail("expected LlmException");
+            } catch (final LlmException e) {
+                assertTrue("cause should be the read timeout: " + e.getCause(), e.getCause() instanceof java.net.SocketTimeoutException);
+            }
+            assertEquals("a read timeout must not be retried", 1, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_doesNotRetryReadTimeout() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        }
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
+            localClient.setTestTimeout(500);
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.streamChat(request, (content, done) -> {});
+                fail("expected LlmException");
+            } catch (final LlmException e) {
+                assertTrue("cause should be the read timeout: " + e.getCause(), e.getCause() instanceof java.net.SocketTimeoutException);
+            }
+            assertEquals("a read timeout must not be retried", 1, server.getRequestCount());
         } finally {
             server.shutdown();
         }

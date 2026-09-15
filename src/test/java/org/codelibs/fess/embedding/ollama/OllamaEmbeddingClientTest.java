@@ -44,6 +44,7 @@ import org.junit.jupiter.api.TestInfo;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
 
 public class OllamaEmbeddingClientTest extends UnitFessTestCase {
 
@@ -950,6 +951,38 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
         }
     }
 
+    @Test
+    public void test_embedDocuments_readTimeout_isNotRetried() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        try {
+            // Ollama accepts every request and never answers. Each attempt waits the full
+            // response timeout, so a retry would only multiply the wait; it would also be
+            // recorded as a second request.
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+
+            client.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            client.setTestModel("nomic-embed-text");
+            client.setTestDimension(3);
+            client.setTestRetryMax(3);
+            client.setTestRetryBaseDelayMs(1L);
+            client.setTestTimeout(500);
+            client.initHttpClient();
+
+            try {
+                client.embedDocuments(List.of("chunk"));
+                fail("expected EmbeddingException after the read timeout");
+            } catch (final EmbeddingException e) {
+                assertTrue(e.getCause() instanceof java.net.SocketTimeoutException, "cause should be the read timeout: " + e.getCause());
+            }
+            assertEquals("a read timeout must not be retried", 1, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
     // ========== Credential masking in logged URLs (FINDING F4.12) ==========
     //
     // The configured Ollama base URL is echoed into WARN/DEBUG log lines on every failure
@@ -1645,6 +1678,10 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
 
         void setTestRetryBaseDelayMs(final long ms) {
             this.testRetryBaseDelayMs = ms;
+        }
+
+        void setTestTimeout(final int timeout) {
+            this.testTimeout = timeout;
         }
 
         void setTestDocumentPrefix(final String prefix) {

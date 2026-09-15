@@ -16,6 +16,7 @@
 package org.codelibs.fess.embedding.ollama;
 
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -26,6 +27,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
+import org.apache.hc.client5.http.ConnectTimeoutException;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.core5.http.ContentType;
@@ -851,7 +853,8 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
 
     /**
      * Executes {@code call} with retry on {@link RetryableHttpException} and
-     * on transient connect-time {@link IOException}s. {@link EmbeddingException}
+     * on transient connect-time {@link IOException}s. A read timeout is not retried
+     * (see {@link #isReadTimeout(IOException)}). {@link EmbeddingException}
      * (RuntimeException) is not caught here and propagates immediately.
      * Backoff is exponential ({@code base * 2^(attempt-1)}) with +/-20% jitter.
      *
@@ -875,7 +878,7 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
                 }
                 sleepBackoff(operation, attempt, maxAttempts, baseDelay, "status", e.statusCode);
             } catch (final IOException e) {
-                if (attempt == maxAttempts) {
+                if (attempt == maxAttempts || isReadTimeout(e)) {
                     lastIo = e;
                     break;
                 }
@@ -886,6 +889,21 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
             throw new IllegalStateException("executeWithRetry exited without exception or success");
         }
         throw lastIo;
+    }
+
+    /**
+     * Returns whether {@code e} is a response (read) timeout: Ollama accepted the request and did
+     * not answer within {@code content_chunker.embedding.ollama.timeout}. It is not retried, because
+     * another attempt waits that long again; a query embedding that never comes back would otherwise
+     * hold a search for the timeout multiplied by the attempt budget. HttpClient reports a connect
+     * timeout as {@link ConnectTimeoutException}, which also extends {@link SocketTimeoutException};
+     * that request never reached Ollama, so it stays retryable.
+     *
+     * @param e the I/O failure of an attempt
+     * @return true when the failure is a read timeout
+     */
+    static boolean isReadTimeout(final IOException e) {
+        return e instanceof SocketTimeoutException && !(e instanceof ConnectTimeoutException);
     }
 
     /**

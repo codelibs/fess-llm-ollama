@@ -151,6 +151,11 @@ Both `chat()` and `streamChat()` retry on:
 - HTTP `500`, `502`, `503` (Ollama queue overload via `OLLAMA_MAX_QUEUE`), `504`
 - `IOException` raised before a response is received (DNS, TCP, TLS, idle-socket failures)
 
+A response timeout is not retried: when `rag.llm.ollama.timeout` elapses without an answer, Ollama
+has accepted the request, and another attempt would wait the full timeout again. The embedding
+client treats `content_chunker.embedding.ollama.timeout` the same way. A connect timeout is still
+retried.
+
 Other `4xx` errors are surfaced as `LlmException` immediately.
 
 Streaming retries only the initial HTTP request. Once NDJSON bytes start flowing,

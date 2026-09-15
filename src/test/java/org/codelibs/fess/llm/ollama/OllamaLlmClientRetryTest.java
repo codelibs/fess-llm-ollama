@@ -16,10 +16,12 @@
 package org.codelibs.fess.llm.ollama;
 
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.hc.client5.http.ConnectTimeoutException;
 import org.codelibs.fess.llm.LlmStreamCallback;
 import org.codelibs.fess.unit.UnitFessTestCase;
 import org.junit.jupiter.api.Test;
@@ -115,5 +117,81 @@ public class OllamaLlmClientRetryTest extends UnitFessTestCase {
             // ok
         }
         assertEquals(2, attempts.get());
+    }
+
+    /**
+     * A read timeout means Ollama accepted the request and did not answer within
+     * {@code rag.llm.ollama.timeout}. Another attempt waits for that timeout again with no better
+     * chance of an answer, so the timeout must propagate from the first attempt and must not be
+     * reported as a retry.
+     */
+    @Test
+    public void test_executeWithRetry_doesNotRetryReadTimeout() throws Exception {
+        final OllamaLlmClient client = new OllamaLlmClient() {
+            @Override
+            protected int getRetryMaxAttempts() {
+                return 3;
+            }
+
+            @Override
+            protected long getRetryBaseDelayMs() {
+                return 0L;
+            }
+        };
+
+        final AtomicInteger retryCount = new AtomicInteger(0);
+        final LlmStreamCallback cb = new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String chunk, final boolean done) {
+                // not used in this test
+            }
+
+            @Override
+            public void onRetry(final String op, final int attempt, final int max, final long sleepMs, final Throwable cause) {
+                retryCount.incrementAndGet();
+            }
+        };
+
+        final AtomicInteger attempts = new AtomicInteger(0);
+        try {
+            client.executeWithRetry("test", () -> {
+                attempts.incrementAndGet();
+                throw new SocketTimeoutException("Read timed out");
+            }, cb);
+            fail("expected the read timeout to propagate");
+        } catch (final SocketTimeoutException expected) {
+            assertEquals("Read timed out", expected.getMessage());
+        }
+        assertEquals("a read timeout must not be retried", 1, attempts.get());
+        assertEquals("onRetry must not fire for a read timeout", 0, retryCount.get());
+    }
+
+    /**
+     * HttpClient reports a connect timeout as {@link ConnectTimeoutException}, which extends
+     * {@link SocketTimeoutException}. The request never reached Ollama, so it stays retryable.
+     */
+    @Test
+    public void test_executeWithRetry_retriesConnectTimeout() throws Exception {
+        final OllamaLlmClient client = new OllamaLlmClient() {
+            @Override
+            protected int getRetryMaxAttempts() {
+                return 3;
+            }
+
+            @Override
+            protected long getRetryBaseDelayMs() {
+                return 0L;
+            }
+        };
+
+        final AtomicInteger attempts = new AtomicInteger(0);
+        final String result = client.executeWithRetry("test", () -> {
+            if (attempts.incrementAndGet() == 1) {
+                throw new ConnectTimeoutException("Connect to localhost:11434 failed: Connect timed out");
+            }
+            return "ok";
+        });
+        assertEquals("ok", result);
+        assertEquals("a connect timeout is retried", 2, attempts.get());
     }
 }
