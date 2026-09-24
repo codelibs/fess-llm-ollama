@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 import org.apache.hc.client5.http.ConnectTimeoutException;
@@ -131,12 +130,6 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
     private static final String CONFIG_API_URL_SUFFIX = "api.url";
 
     /**
-     * Set once the userinfo refusal has been reported. The availability check runs on a
-     * timer, so an unguarded ERROR would repeat for as long as the misconfiguration stands.
-     */
-    private final AtomicBoolean userinfoRejectionReported = new AtomicBoolean();
-
-    /**
      * Default embedding model.
      *
      * <p>{@code embeddinggemma} is multilingual, where {@code nomic-embed-text} is trained on
@@ -182,6 +175,8 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
         if (isUserinfoRefused(apiUrl)) {
             // Fail closed: this method is reached synchronously from init(), so a throw here
             // would escape the container's eager init-method assembler. See isUserinfoRefused.
+            // Reported on every check, so the misconfiguration stays visible for as long as it stands.
+            logger.error("[Embedding:OLLAMA] {}", OllamaUrlUtil.userinfoRejectionMessage(apiUrlConfigKey()));
             return false;
         }
         try {
@@ -204,8 +199,7 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
     }
 
     /**
-     * Reports whether {@code apiUrl} carries a userinfo subcomponent, logging the remedy at
-     * ERROR the first time it does. See
+     * Reports whether {@code apiUrl} carries a userinfo subcomponent. See
      * {@link OllamaUrlUtil#userinfoRejectionMessage(String)} for why such an endpoint can
      * never issue a request and what the operator should configure instead.
      *
@@ -218,6 +212,11 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
      * The embed path is not on that path and does throw, so the caller gets the remedy rather
      * than an opaque protocol failure.
      *
+     * <p>The remedy is logged at ERROR by {@link #checkAvailabilityNow()} on every check, so it
+     * repeats at the availability-check interval for as long as the misconfiguration stands and
+     * reappears if it is ever reintroduced. Request-time callers do not log it: they run per
+     * request or per indexed batch, and the exception they throw already carries the remedy.
+     *
      * <p>The message names only the configuration key and the proxy settings, never any part
      * of the configured value, so the credential reaches neither the log nor the exception.
      *
@@ -225,13 +224,7 @@ public class OllamaEmbeddingClient extends AbstractEmbeddingClient {
      * @return {@code true} when the endpoint must be refused
      */
     protected boolean isUserinfoRefused(final String apiUrl) {
-        if (!CredentialUrlUtil.hasUserInfo(apiUrl)) {
-            return false;
-        }
-        if (userinfoRejectionReported.compareAndSet(false, true)) {
-            logger.error("[Embedding:OLLAMA] {}", OllamaUrlUtil.userinfoRejectionMessage(apiUrlConfigKey()));
-        }
-        return true;
+        return CredentialUrlUtil.hasUserInfo(apiUrl);
     }
 
     /**

@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.ConnectTimeoutException;
@@ -87,12 +86,6 @@ public class OllamaLlmClient extends AbstractLlmClient {
     private static final String CONFIG_API_URL = "rag.llm.ollama.api.url";
 
     /**
-     * Set once the userinfo refusal has been reported. The availability check runs on a
-     * timer, so an unguarded ERROR would repeat for as long as the misconfiguration stands.
-     */
-    private final AtomicBoolean userinfoRejectionReported = new AtomicBoolean();
-
-    /**
      * Default constructor.
      */
     public OllamaLlmClient() {
@@ -116,6 +109,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
         if (isUserinfoRefused(apiUrl)) {
             // Fail closed: this method is reached synchronously from init(), so a throw here
             // would escape the container's eager init-method assembler. See isUserinfoRefused.
+            // Reported on every check, so the misconfiguration stays visible for as long as it stands.
+            logger.error("[LLM:OLLAMA] {}", OllamaUrlUtil.userinfoRejectionMessage(CONFIG_API_URL));
             return false;
         }
         try {
@@ -182,8 +177,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
     }
 
     /**
-     * Reports whether {@code apiUrl} carries a userinfo subcomponent, logging the remedy at
-     * ERROR the first time it does. See
+     * Reports whether {@code apiUrl} carries a userinfo subcomponent. See
      * {@link OllamaUrlUtil#userinfoRejectionMessage(String)} for why such an endpoint can
      * never issue a request and what the operator should configure instead.
      *
@@ -197,6 +191,11 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * {@link #streamChat(LlmChatRequest, LlmStreamCallback)}) are not on that path and do
      * throw, so the caller gets the remedy rather than an opaque protocol failure.
      *
+     * <p>The remedy is logged at ERROR by {@link #checkAvailabilityNow()} on every check, so it
+     * repeats at the availability-check interval for as long as the misconfiguration stands and
+     * reappears if it is ever reintroduced. Request-time callers do not log it: they run once per
+     * chat request, and the exception they throw already carries the remedy.
+     *
      * <p>The message names only the configuration key and the proxy settings, never any part
      * of the configured value, so the credential reaches neither the log nor the exception.
      *
@@ -204,13 +203,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @return {@code true} when the endpoint must be refused.
      */
     protected boolean isUserinfoRefused(final String apiUrl) {
-        if (!CredentialUrlUtil.hasUserInfo(apiUrl)) {
-            return false;
-        }
-        if (userinfoRejectionReported.compareAndSet(false, true)) {
-            logger.error("[LLM:OLLAMA] {}", OllamaUrlUtil.userinfoRejectionMessage(CONFIG_API_URL));
-        }
-        return true;
+        return CredentialUrlUtil.hasUserInfo(apiUrl);
     }
 
     @Override
