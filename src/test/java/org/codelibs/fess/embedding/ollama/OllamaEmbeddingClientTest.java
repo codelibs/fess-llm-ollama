@@ -1127,7 +1127,9 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
     }
 
     @Test
-    public void test_checkAvailabilityNow_userinfoUrl_errorFiresOnceNotPerCall() {
+    public void test_checkAvailabilityNow_userinfoUrl_errorFiresOnEveryCheck() {
+        // No latch: every availability check that finds the misconfiguration reports it, so the
+        // log keeps showing why the client is unavailable for as long as it stands.
         client.setTestApiUrl(USERINFO_API_URL);
         client.setTestModel("nomic-embed-text");
         client.initHttpClient();
@@ -1138,10 +1140,41 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
             client.checkAvailabilityNow();
             client.checkAvailabilityNow();
 
-            assertTrue(capture.renderedAt(Level.ERROR).size() == 1,
-                    "three checks must produce one ERROR, not three: " + capture.renderedAt(Level.ERROR));
+            assertTrue(capture.renderedAt(Level.ERROR).size() == 3,
+                    "three checks must produce three ERRORs: " + capture.renderedAt(Level.ERROR));
+            assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
         } finally {
             capture.detach();
+        }
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_userinfoUrl_reportedAgainAfterRecovery() throws Exception {
+        // The misconfiguration is fixed, then reintroduced: the second occurrence must be
+        // reported too, not silenced by the first.
+        final MockWebServer server = new MockWebServer();
+        final LogCapturingAppender capture = LogCapturingAppender.attach(OllamaEmbeddingClient.class);
+        try {
+            server.enqueue(new MockResponse().setBody("{\"models\":[{\"name\":\"nomic-embed-text\"}]}"));
+            server.start();
+            client.setTestModel("nomic-embed-text");
+            client.initHttpClient();
+
+            client.setTestApiUrl(USERINFO_API_URL);
+            assertFalse(client.checkAvailabilityNow());
+            assertTrue(capture.renderedAt(Level.ERROR).size() == 1, "first occurrence: " + capture.renderedAt(Level.ERROR));
+
+            client.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            assertTrue(client.checkAvailabilityNow(), "the corrected endpoint must be available");
+            assertTrue(capture.renderedAt(Level.ERROR).size() == 1, "recovery must not log: " + capture.renderedAt(Level.ERROR));
+
+            client.setTestApiUrl(USERINFO_API_URL);
+            assertFalse(client.checkAvailabilityNow());
+            assertTrue(capture.renderedAt(Level.ERROR).size() == 2,
+                    "the recurrence must be reported again: " + capture.renderedAt(Level.ERROR));
+        } finally {
+            capture.detach();
+            server.shutdown();
         }
     }
 
@@ -1212,6 +1245,8 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
                         "no part of the thrown exception or its cause chain may carry the credential: "
                                 + LogCapturingAppender.renderThrowable(e));
             }
+            assertTrue(capture.renderedAt(Level.ERROR).isEmpty(),
+                    "a request-time refusal is reported by the thrown exception, not logged per batch: " + capture.renderedAt(Level.ERROR));
             assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
         } finally {
             capture.detach();
@@ -1238,6 +1273,8 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
                         "no part of the thrown exception or its cause chain may carry the credential: "
                                 + LogCapturingAppender.renderThrowable(e));
             }
+            assertTrue(capture.renderedAt(Level.ERROR).isEmpty(),
+                    "a request-time refusal is reported by the thrown exception, not logged per batch: " + capture.renderedAt(Level.ERROR));
             assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
         } finally {
             capture.detach();
@@ -1256,7 +1293,7 @@ public class OllamaEmbeddingClientTest extends UnitFessTestCase {
 
             assertFalse(probe.isAvailable(), "the refused client must report unavailable, not available");
             assertTrue(capture.renderedAt(Level.ERROR).size() == 1,
-                    "init() must surface the misconfiguration exactly once: " + capture.renderedAt(Level.ERROR));
+                    "the check init() runs must surface the misconfiguration: " + capture.renderedAt(Level.ERROR));
             assertNoCapturedEventCarries(capture, USERINFO_PASSWORD);
         } catch (final RuntimeException e) {
             throw new AssertionError("init() must not throw for a userinfo-bearing api.url: " + e, e);
