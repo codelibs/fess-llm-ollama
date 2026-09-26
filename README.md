@@ -185,6 +185,14 @@ A sibling WARN line is emitted when `done_reason` is anything other than `stop`,
 [LLM:OLLAMA] Stream finished abnormally. doneReason=length, evalCount=N, ...
 ```
 
+A stream that ends without Ollama's final `{"done": true}` object (a body cut short by a
+proxy, or a response that is not NDJSON at all) fails with an `invalid_response`
+`LlmException` instead of completing with a partial answer, after a WARN line:
+
+```
+[LLM:OLLAMA] Stream ended without a done message. chunkCount=N, objectCount=N, parseErrorCount=N, model=...
+```
+
 ## Reasoning Model Configuration (e.g., qwen3.5)
 
 Reasoning models like `qwen3.5` use internal thinking tokens that improve answer quality

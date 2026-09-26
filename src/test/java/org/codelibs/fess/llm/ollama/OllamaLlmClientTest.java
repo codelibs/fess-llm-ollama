@@ -1583,6 +1583,58 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_bodyEndingWithoutDoneFails() throws Exception {
+        // The body ends cleanly but Ollama's final {"done":true} object never arrives: the answer
+        // is cut short, so it must not be reported as a completed stream.
+        assertStreamWithoutDoneFails(
+                "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n" + "{\"message\":{\"content\":\" wor\"},\"done\":false}\n",
+                "application/x-ndjson", List.of("Hello", " wor"));
+    }
+
+    @Test
+    public void test_streamChat_nonNdjsonBodyFails() throws Exception {
+        // A misconfigured gateway answers 200 with a page instead of NDJSON: nothing parses.
+        assertStreamWithoutDoneFails("<html>not json</html>\n", "text/html", List.of());
+    }
+
+    private void assertStreamWithoutDoneFails(final String body, final String contentType, final List<String> expectedChunks)
+            throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setHeader("Content-Type", contentType).setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            final List<String> chunks = new ArrayList<>();
+            final List<Throwable> errors = new ArrayList<>();
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String content, final boolean done) {
+                        chunks.add(content);
+                    }
+
+                    @Override
+                    public void onError(final Throwable e) {
+                        errors.add(e);
+                    }
+                });
+                fail("expected LlmException");
+            } catch (final LlmException e) {
+                assertEquals(LlmException.ERROR_INVALID_RESPONSE, e.getErrorCode());
+            }
+            assertEquals(expectedChunks, chunks);
+            assertEquals(1, errors.size());
+            assertEquals(1, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
     public void test_streamChat_retriesOn503BeforeBody() throws Exception {
         final MockWebServer server = new MockWebServer();
         server.enqueue(new MockResponse().setResponseCode(503));

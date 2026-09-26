@@ -385,6 +385,8 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @param callback the stream callback to invoke for each chunk.
      * @param startTime the millisecond timestamp captured before the request, for elapsed-time logs.
      * @throws IOException if reading the stream fails.
+     * @throws LlmException if Ollama reports an error in the stream, or the stream ends without
+     *             its final {@code done} object.
      */
     private void consumeStream(final String model, final org.apache.hc.client5.http.impl.classic.CloseableHttpResponse response,
             final LlmStreamCallback callback, final long startTime) throws IOException {
@@ -392,6 +394,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
         int objectCount = 0;
         int parseErrorCount = 0;
         long firstChunkTime = 0;
+        boolean doneReceived = false;
         String doneReason = null;
         long totalDurationNs = 0L;
         long loadDurationNs = 0L;
@@ -436,6 +439,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     }
 
                     if (done) {
+                        doneReceived = true;
                         doneReason = jsonNode.path("done_reason").asText(null);
                         totalDurationNs = jsonNode.path("total_duration").asLong(0L);
                         loadDurationNs = jsonNode.path("load_duration").asLong(0L);
@@ -461,6 +465,14 @@ public class OllamaLlmClient extends AbstractLlmClient {
                 chunkCount, objectCount, firstChunkTime, System.currentTimeMillis() - startTime, doneReason, totalDurationNs / 1_000_000L,
                 loadDurationNs / 1_000_000L, promptEvalDurationNs / 1_000_000L, evalDurationMs, promptEvalCount, evalCount, tokensPerSecond,
                 parseErrorCount);
+
+        if (!doneReceived) {
+            // Ollama always ends a stream with a {"done":true} object; without it the answer was cut
+            // short (or the body was not NDJSON at all) and must not be reported as complete.
+            logger.warn("[LLM:OLLAMA] Stream ended without a done message. chunkCount={}, objectCount={}, parseErrorCount={}, model={}",
+                    chunkCount, objectCount, parseErrorCount, model);
+            throw new LlmException("Ollama stream ended without a done message", LlmException.ERROR_INVALID_RESPONSE);
+        }
 
         if (doneReason != null && !NORMAL_DONE_REASONS.contains(doneReason)) {
             logger.warn("[LLM:OLLAMA] Stream finished abnormally. doneReason={}, evalCount={}, " + "promptEvalCount={}, model={}",

@@ -70,7 +70,8 @@ exponential backoff starting at `rag.llm.ollama.retry.base.delay.ms` (default
 Other `4xx` is treated as a configuration error. Streaming retries only the
 initial connect — once the NDJSON body starts flowing, partial-stream errors
 (transport failures **or** in-stream `{"error": "..."}` payloads) propagate
-immediately to `LlmStreamCallback.onError(...)`.
+immediately to `LlmStreamCallback.onError(...)`. A body that ends without the final
+`{"done": true}` object fails the same way (`invalid_response`).
 
 Timeouts are two-tier:
 - `rag.llm.ollama.connect.timeout` (default `5000`) — TCP connect, connection-request acquisition.
