@@ -353,7 +353,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
                     }
 
                     try {
-                        consumeStream((String) requestBody.get("model"), response, callback, startTime);
+                        consumeStream((String) requestBody.get("model"), httpRequest, response, callback, startTime);
                     } catch (final IOException e) {
                         // The body has started flowing and chunks may already have reached the
                         // callback, so another attempt would replay the answer from its start.
@@ -381,6 +381,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * Caller is responsible for closing {@code response}.
      *
      * @param model the model name (used for log context).
+     * @param httpRequest the request, cancelled when reading stops before the end of the stream.
      * @param response the HTTP response holding the NDJSON entity.
      * @param callback the stream callback to invoke for each chunk.
      * @param startTime the millisecond timestamp captured before the request, for elapsed-time logs.
@@ -388,8 +389,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
      * @throws LlmException if Ollama reports an error in the stream, or the stream ends without
      *             its final {@code done} object.
      */
-    private void consumeStream(final String model, final org.apache.hc.client5.http.impl.classic.CloseableHttpResponse response,
-            final LlmStreamCallback callback, final long startTime) throws IOException {
+    private void consumeStream(final String model, final HttpPost httpRequest,
+            final org.apache.hc.client5.http.impl.classic.CloseableHttpResponse response, final LlmStreamCallback callback,
+            final long startTime) throws IOException {
         int chunkCount = 0;
         int objectCount = 0;
         int parseErrorCount = 0;
@@ -404,55 +406,63 @@ public class OllamaLlmClient extends AbstractLlmClient {
         int evalCount = 0;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
             String line;
-            while ((line = reader.readLine()) != null) {
-                if (StringUtil.isBlank(line)) {
-                    continue;
-                }
-                try {
-                    final JsonNode jsonNode = objectMapper.readTree(line);
-                    objectCount++;
-
-                    final JsonNode errorNode = jsonNode.path("error");
-                    if (!errorNode.isMissingNode() && !errorNode.isNull()) {
-                        final String errorMessage = errorNode.asText();
-                        logger.warn("[LLM:OLLAMA] Stream error received from Ollama. model={}, error={}", model, errorMessage);
-                        throw new LlmException("Ollama stream error: " + errorMessage, LlmException.ERROR_INVALID_RESPONSE);
+            try {
+                while ((line = reader.readLine()) != null) {
+                    if (StringUtil.isBlank(line)) {
+                        continue;
                     }
+                    try {
+                        final JsonNode jsonNode = objectMapper.readTree(line);
+                        objectCount++;
 
-                    final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
-
-                    final JsonNode messageNode = jsonNode.path("message");
-                    final JsonNode contentNode = messageNode.path("content");
-                    if (!contentNode.isMissingNode()) {
-                        final String content = contentNode.asText();
-                        if (content.isEmpty() && !done && !messageNode.path("thinking").isMissingNode()) {
-                            // Skip thinking-only chunk
-                            continue;
+                        final JsonNode errorNode = jsonNode.path("error");
+                        if (!errorNode.isMissingNode() && !errorNode.isNull()) {
+                            final String errorMessage = errorNode.asText();
+                            logger.warn("[LLM:OLLAMA] Stream error received from Ollama. model={}, error={}", model, errorMessage);
+                            throw new LlmException("Ollama stream error: " + errorMessage, LlmException.ERROR_INVALID_RESPONSE);
                         }
-                        callback.onChunk(content, done);
-                        if (chunkCount == 0) {
-                            firstChunkTime = System.currentTimeMillis() - startTime;
-                        }
-                        chunkCount++;
-                    } else if (done) {
-                        callback.onChunk("", true);
-                    }
 
-                    if (done) {
-                        doneReceived = true;
-                        doneReason = jsonNode.path("done_reason").asText(null);
-                        totalDurationNs = jsonNode.path("total_duration").asLong(0L);
-                        loadDurationNs = jsonNode.path("load_duration").asLong(0L);
-                        promptEvalDurationNs = jsonNode.path("prompt_eval_duration").asLong(0L);
-                        evalDurationNs = jsonNode.path("eval_duration").asLong(0L);
-                        promptEvalCount = jsonNode.path("prompt_eval_count").asInt(0);
-                        evalCount = jsonNode.path("eval_count").asInt(0);
-                        break;
+                        final boolean done = jsonNode.has("done") && jsonNode.get("done").asBoolean();
+
+                        final JsonNode messageNode = jsonNode.path("message");
+                        final JsonNode contentNode = messageNode.path("content");
+                        if (!contentNode.isMissingNode()) {
+                            final String content = contentNode.asText();
+                            if (content.isEmpty() && !done && !messageNode.path("thinking").isMissingNode()) {
+                                // Skip thinking-only chunk
+                                continue;
+                            }
+                            callback.onChunk(content, done);
+                            if (chunkCount == 0) {
+                                firstChunkTime = System.currentTimeMillis() - startTime;
+                            }
+                            chunkCount++;
+                        } else if (done) {
+                            callback.onChunk("", true);
+                        }
+
+                        if (done) {
+                            doneReceived = true;
+                            doneReason = jsonNode.path("done_reason").asText(null);
+                            totalDurationNs = jsonNode.path("total_duration").asLong(0L);
+                            loadDurationNs = jsonNode.path("load_duration").asLong(0L);
+                            promptEvalDurationNs = jsonNode.path("prompt_eval_duration").asLong(0L);
+                            evalDurationNs = jsonNode.path("eval_duration").asLong(0L);
+                            promptEvalCount = jsonNode.path("prompt_eval_count").asInt(0);
+                            evalCount = jsonNode.path("eval_count").asInt(0);
+                            break;
+                        }
+                    } catch (final JacksonException e) {
+                        parseErrorCount++;
+                        logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
                     }
-                } catch (final JacksonException e) {
-                    parseErrorCount++;
-                    logger.warn("[LLM:OLLAMA] Failed to parse streaming response. line={}", line, e);
                 }
+            } catch (final IOException | RuntimeException e) {
+                // Closing the reader would otherwise read the rest of the answer to its end (HttpCore
+                // drains an unfinished entity to reuse the connection), keeping this thread, its
+                // concurrency permit and Ollama busy on an answer nobody will read.
+                httpRequest.cancel();
+                throw e;
             }
         }
 

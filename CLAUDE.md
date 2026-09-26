@@ -72,6 +72,9 @@ initial connect — once the NDJSON body starts flowing, partial-stream errors
 (transport failures **or** in-stream `{"error": "..."}` payloads) propagate
 immediately to `LlmStreamCallback.onError(...)`. A body that ends without the final
 `{"done": true}` object fails the same way (`invalid_response`).
+When reading stops before the end of the body (the callback throws, e.g. on an SSE
+client disconnect, or an in-stream error), `consumeStream` cancels the request first:
+closing HttpCore's entity stream would otherwise drain the rest of the answer.
 
 Timeouts are two-tier:
 - `rag.llm.ollama.connect.timeout` (default `5000`) — TCP connect, connection-request acquisition.

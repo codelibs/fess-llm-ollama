@@ -765,6 +765,50 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_callerAbortDoesNotDrainRemainingStream() throws Exception {
+        // When the callback gives up (e.g. the browser closed the SSE connection), the rest of the
+        // answer must not be read to its end: that holds the concurrency permit and the HTTP
+        // connection until Ollama finishes generating an answer nobody will read.
+        final MockWebServer server = new MockWebServer();
+        try {
+            final StringBuilder body = new StringBuilder();
+            for (int i = 0; i < 200; i++) {
+                body.append("{\"message\":{\"content\":\"chunk").append(i).append("\"},\"done\":false}\n");
+            }
+            body.append("{\"message\":{\"content\":\"\"},\"done\":true}\n");
+            // ~7.6 KB at 256 bytes per 200 ms: reading it to the end takes about 6 seconds.
+            server.enqueue(new MockResponse().setBody(body.toString())
+                    .setHeader("Content-Type", "application/x-ndjson")
+                    .throttleBody(256, 200, java.util.concurrent.TimeUnit.MILLISECONDS));
+            server.start();
+
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("").toString().replaceAll("/$", ""));
+            localClient.setTestModel("llama3:latest");
+            localClient.initHttpClient();
+
+            final LlmChatRequest request = new LlmChatRequest();
+            request.addMessage(new LlmMessage("user", "Hello"));
+
+            final IllegalStateException abort = new IllegalStateException("client disconnected");
+            final long start = System.currentTimeMillis();
+            try {
+                localClient.streamChat(request, (content, done) -> {
+                    throw abort;
+                });
+                fail("Expected the callback's exception to propagate");
+            } catch (final IllegalStateException e) {
+                assertSame(abort, e);
+            }
+            final long elapsed = System.currentTimeMillis() - start;
+            assertTrue(elapsed < 3000, "streamChat kept reading the abandoned stream for " + elapsed + "ms");
+            assertEquals(1, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
     public void test_streamChat_stopDoneReasonNoWarn() throws Exception {
         assertNoAbnormalWarnFor("stop");
     }
