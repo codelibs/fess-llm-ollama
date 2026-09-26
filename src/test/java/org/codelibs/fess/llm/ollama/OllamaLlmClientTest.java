@@ -1535,6 +1535,54 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_doesNotRetryAfterBodyStarted() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        // The connection drops halfway through the body, after the first chunk has reached the
+        // callback. A retry would replay the answer from the start, so the caller would see
+        // "Hello" twice; a second request here is that replay.
+        final String body = "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n" + "{\"message\":{\"content\":\"" + "x".repeat(400)
+                + "\"},\"done\":false}\n" + "{\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson")
+                    .setChunkedBody(body, 32)
+                    .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY));
+        }
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            final List<String> chunks = new ArrayList<>();
+            final List<Throwable> errors = new ArrayList<>();
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String content, final boolean done) {
+                        chunks.add(content);
+                    }
+
+                    @Override
+                    public void onError(final Throwable e) {
+                        errors.add(e);
+                    }
+                });
+                fail("expected LlmException");
+            } catch (final LlmException e) {
+                assertEquals(LlmException.ERROR_CONNECTION, e.getErrorCode());
+            }
+            assertEquals("a stream whose body has started must not be retried", 1, server.getRequestCount());
+            assertEquals(List.of("Hello"), chunks);
+            assertEquals(1, errors.size());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
     public void test_streamChat_retriesOn503BeforeBody() throws Exception {
         final MockWebServer server = new MockWebServer();
         server.enqueue(new MockResponse().setResponseCode(503));

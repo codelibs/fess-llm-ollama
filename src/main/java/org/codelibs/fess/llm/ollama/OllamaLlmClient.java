@@ -352,7 +352,15 @@ public class OllamaLlmClient extends AbstractLlmClient {
                         throw new LlmException("Empty response from Ollama");
                     }
 
-                    consumeStream((String) requestBody.get("model"), response, callback, startTime);
+                    try {
+                        consumeStream((String) requestBody.get("model"), response, callback, startTime);
+                    } catch (final IOException e) {
+                        // The body has started flowing and chunks may already have reached the
+                        // callback, so another attempt would replay the answer from its start.
+                        logger.warn("[LLM:OLLAMA] Stream interrupted after the response body started. url={}, error={}",
+                                CredentialUrlUtil.maskCredentialInUrl(url), e.getMessage(), e);
+                        throw new LlmException("Ollama stream was interrupted", LlmException.ERROR_CONNECTION, e);
+                    }
                     return null;
                 }
             }, callback);
