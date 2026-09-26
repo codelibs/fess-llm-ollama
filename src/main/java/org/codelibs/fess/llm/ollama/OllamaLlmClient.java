@@ -858,6 +858,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(4096);
             }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
             break;
         case "answer":
             if (request.getTemperature() == null) {
@@ -866,6 +869,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(8192);
             }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
             break;
         case "summary":
             if (request.getTemperature() == null) {
@@ -873,6 +879,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
             }
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(8192);
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
             }
             break;
         case "queryregeneration":

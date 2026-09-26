@@ -87,7 +87,7 @@ Each prompt type (`intent`, `evaluation`, `unclear`, `noresults`, `docnotfound`,
 `direct`, `faq`, `answer`, `summary`, `queryregeneration`) supports the
 following per-type overrides via `fess_config.properties`:
 
-- `rag.llm.ollama.<type>.thinking.budget` — boolean form (`0` ⇒ `think: false`, `>0` ⇒ `think: true`)
+- `rag.llm.ollama.<type>.thinking.budget` — boolean form (`0` ⇒ `think: false`, `>0` ⇒ `think: true`); the hardcoded default is `0` for every type
 - `rag.llm.ollama.<type>.thinking.level` — string form (`high` / `medium` / `low`); required for GPT-OSS family models which ignore the boolean form. When set, overrides the boolean derived from `thinking.budget` for that prompt type.
 - `rag.llm.ollama.<type>.max.tokens`
 - `rag.llm.ollama.<type>.temperature`

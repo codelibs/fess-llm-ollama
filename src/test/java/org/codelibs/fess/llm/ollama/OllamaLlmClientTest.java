@@ -1134,33 +1134,53 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
-    public void test_applyDefaultParams_answer_noThinkingDefault() {
+    public void test_applyDefaultParams_answer_thinkingDisabledByDefault() {
         final LlmChatRequest request = new LlmChatRequest();
         assertNull(request.getThinkingBudget());
 
         client.applyDefaultParams(request, "answer");
 
-        assertNull(request.getThinkingBudget());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test
-    public void test_applyDefaultParams_summary_noThinkingDefault() {
+    public void test_applyDefaultParams_summary_thinkingDisabledByDefault() {
         final LlmChatRequest request = new LlmChatRequest();
         assertNull(request.getThinkingBudget());
 
         client.applyDefaultParams(request, "summary");
 
-        assertNull(request.getThinkingBudget());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test
-    public void test_applyDefaultParams_direct_noThinkingDefault() {
+    public void test_applyDefaultParams_direct_thinkingDisabledByDefault() {
         final LlmChatRequest request = new LlmChatRequest();
         assertNull(request.getThinkingBudget());
 
         client.applyDefaultParams(request, "direct");
 
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_faq_thinkingDisabledByDefault() {
+        final LlmChatRequest request = new LlmChatRequest();
         assertNull(request.getThinkingBudget());
+
+        client.applyDefaultParams(request, "faq");
+
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_answer_keepsConfiguredThinkingBudget() {
+        final LlmChatRequest request = new LlmChatRequest();
+        request.setThinkingBudget(1);
+
+        client.applyDefaultParams(request, "answer");
+
+        assertEquals(Integer.valueOf(1), request.getThinkingBudget());
     }
 
     // --- applyPromptTypeParams config-key tests ---

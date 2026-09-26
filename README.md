@@ -50,7 +50,7 @@ loaded once at container boot; changes require a Fess restart):
 | `rag.llm.ollama.connect.timeout` | `5000` | TCP connect timeout (ms). Separate from `timeout` (read/response). |
 | `rag.llm.ollama.default.max.tokens` | (unset) | Fallback when `<type>.max.tokens` is not set. |
 | `rag.llm.ollama.default.temperature` | (unset) | Fallback when `<type>.temperature` is not set. |
-| `rag.llm.ollama.default.thinking.budget` | (unset) | Fallback when `<type>.thinking.budget` is not set. |
+| `rag.llm.ollama.default.thinking.budget` | (unset) | Fallback when `<type>.thinking.budget` is not set. Without either, every prompt type sends `think: false`. |
 | `rag.llm.ollama.faq.context.max.chars` | `6000` | Maximum characters for document context in FAQ generation |
 | `rag.llm.ollama.model` | `gemma4:e4b` | Model name (e.g., `llama3:latest`, `mistral`) |
 | `rag.llm.ollama.retry.base.delay.ms` | `2000` | Base delay (ms) for exponential backoff with ±20% jitter. |
@@ -195,19 +195,13 @@ proxy, or a response that is not NDJSON at all) fails with an `invalid_response`
 
 ## Reasoning Model Configuration (e.g., qwen3.5)
 
-Reasoning models like `qwen3.5` use internal thinking tokens that improve answer quality
-but consume output tokens. Configure thinking per prompt type for optimal results.
+Reasoning models like `qwen3.5` use internal thinking tokens that can improve answer quality
+but consume output tokens and delay the first streamed chunk. Every prompt type sends
+`think: false` by default; enable thinking only for the prompt types that benefit from it.
 
 ```properties
 rag.llm.ollama.model=qwen3.5:35b
 rag.llm.ollama.timeout=120000
-
-# Structured output / short responses - disable thinking
-rag.llm.ollama.intent.thinking.budget=0
-rag.llm.ollama.evaluation.thinking.budget=0
-rag.llm.ollama.unclear.thinking.budget=0
-rag.llm.ollama.noresults.thinking.budget=0
-rag.llm.ollama.docnotfound.thinking.budget=0
 
 # Answer generation - enable thinking with increased token limit
 rag.llm.ollama.answer.thinking.budget=1
@@ -221,9 +215,11 @@ rag.llm.ollama.faq.max.tokens=8192
 ```
 
 The `thinking.budget` parameter controls the Ollama `think` flag as a boolean:
-- `0` — disable thinking (`think: false`)
+- `0` — disable thinking (`think: false`); the default for every prompt type
 - Any positive value — enable thinking (`think: true`)
-- Not set — use model default (reasoning models default to thinking enabled)
+
+`rag.llm.ollama.default.thinking.budget` sets the value for every prompt type that has no
+`<type>.thinking.budget` of its own.
 
 When thinking is enabled, increase `max.tokens` to accommodate both thinking and content tokens.
 
