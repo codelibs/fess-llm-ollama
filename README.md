@@ -158,6 +158,10 @@ retried.
 
 Other `4xx` errors are surfaced as `LlmException` immediately.
 
+When the attempts run out, the `LlmException` carries the error code of the last status:
+`rate_limit` for `429` and `service_unavailable` for `5xx`, so the chat UI shows a "try again
+later" message rather than a connection failure. Failures before any response are `connection_error`.
+
 Streaming retries only the initial HTTP request. Once NDJSON bytes start flowing,
 in-stream errors (HTTP transport failures **or** NDJSON `{"error": "..."}` payloads)
 propagate immediately to `LlmStreamCallback.onError(...)` — no replay.

@@ -67,7 +67,9 @@ are retried up to `rag.llm.ollama.retry.max` times (default `3`) with
 exponential backoff starting at `rag.llm.ollama.retry.base.delay.ms` (default
 `2000`) and ±20% jitter. The retryable set tracks the documented Ollama errors
 (<https://docs.ollama.com/api/errors>) and covers Ollama Cloud rate limits.
-Other `4xx` is treated as a configuration error. Streaming retries only the
+Other `4xx` is treated as a configuration error. When the attempts run out, the
+`LlmException` carries `rate_limit` (last status `429`) or `service_unavailable` (`5xx`);
+failures before any response stay `connection_error`. Streaming retries only the
 initial connect — once the NDJSON body starts flowing, partial-stream errors
 (transport failures **or** in-stream `{"error": "..."}` payloads) propagate
 immediately to `LlmStreamCallback.onError(...)`. A body that ends without the final
