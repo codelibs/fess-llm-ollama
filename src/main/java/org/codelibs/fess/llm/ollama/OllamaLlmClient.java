@@ -291,7 +291,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
         } catch (final Exception e) {
             logger.warn("[LLM:OLLAMA] Failed to call Ollama API. url={}, error={}", CredentialUrlUtil.maskCredentialInUrl(url),
                     e.getMessage(), e);
-            throw new LlmException("Failed to call Ollama API", LlmException.ERROR_CONNECTION, e);
+            throw new LlmException("Failed to call Ollama API", resolveFailureErrorCode(e), e);
         }
     }
 
@@ -370,7 +370,7 @@ public class OllamaLlmClient extends AbstractLlmClient {
         } catch (final IOException e) {
             logger.warn("[LLM:OLLAMA] Failed to stream from Ollama API. url={}, error={}", CredentialUrlUtil.maskCredentialInUrl(url),
                     e.getMessage(), e);
-            final LlmException llmException = new LlmException("Failed to stream from Ollama API", LlmException.ERROR_CONNECTION, e);
+            final LlmException llmException = new LlmException("Failed to stream from Ollama API", resolveFailureErrorCode(e), e);
             callback.onError(llmException);
             throw llmException;
         }
@@ -1025,6 +1025,22 @@ public class OllamaLlmClient extends AbstractLlmClient {
             this.statusCode = statusCode;
             this.reason = reason;
         }
+    }
+
+    /**
+     * Resolves the error code for a call that failed without an {@link LlmException}. When the
+     * retry budget ran out on a retryable HTTP status, the status says what went wrong: {@code 429}
+     * is {@code rate_limit} and a {@code 5xx} is {@code service_unavailable}. Anything else
+     * (DNS, TCP, TLS, read failures) is {@code connection_error}.
+     *
+     * @param e the failure.
+     * @return the {@link LlmException} error code.
+     */
+    static String resolveFailureErrorCode(final Throwable e) {
+        if (e.getCause() instanceof final RetryableHttpException retryable) {
+            return retryable.statusCode == 429 ? LlmException.ERROR_RATE_LIMIT : LlmException.ERROR_SERVICE_UNAVAILABLE;
+        }
+        return LlmException.ERROR_CONNECTION;
     }
 
     /**

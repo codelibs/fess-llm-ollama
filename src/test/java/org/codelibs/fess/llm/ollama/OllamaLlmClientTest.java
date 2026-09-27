@@ -1767,8 +1767,75 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
                 localClient.chat(request);
                 fail("expected LlmException after retries exhausted");
             } catch (final LlmException e) {
-                // expected
+                assertEquals(LlmException.ERROR_SERVICE_UNAVAILABLE, e.getErrorCode());
             }
+            assertEquals(3, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_retryBudgetExhaustedOn429ReportsRateLimit() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setResponseCode(429));
+        }
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            try {
+                localClient.chat(request);
+                fail("expected LlmException after retries exhausted");
+            } catch (final LlmException e) {
+                assertEquals(LlmException.ERROR_RATE_LIMIT, e.getErrorCode());
+            }
+            assertEquals(3, server.getRequestCount());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    public void test_streamChat_retryBudgetExhaustedOn429ReportsRateLimit() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setResponseCode(429));
+        }
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestRetryMax(3);
+            localClient.setTestRetryBaseDelayMs(1L);
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            final List<Throwable> errors = new ArrayList<>();
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String content, final boolean done) {
+                        fail("no chunk expected");
+                    }
+
+                    @Override
+                    public void onError(final Throwable e) {
+                        errors.add(e);
+                    }
+                });
+                fail("expected LlmException after retries exhausted");
+            } catch (final LlmException e) {
+                assertEquals(LlmException.ERROR_RATE_LIMIT, e.getErrorCode());
+            }
+            assertEquals(1, errors.size());
+            assertEquals(LlmException.ERROR_RATE_LIMIT, ((LlmException) errors.get(0)).getErrorCode());
             assertEquals(3, server.getRequestCount());
         } finally {
             server.shutdown();
