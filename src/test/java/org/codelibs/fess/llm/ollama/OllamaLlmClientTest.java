@@ -35,6 +35,7 @@ import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.llm.LlmUsage;
 import org.codelibs.fess.ollama.OllamaUrlUtil;
 import org.codelibs.fess.unit.LogCapturingAppender;
 import org.codelibs.fess.unit.UnitFessTestCase;
@@ -1659,6 +1660,100 @@ public class OllamaLlmClientTest extends UnitFessTestCase {
     public void test_streamChat_nonNdjsonBodyFails() throws Exception {
         // A misconfigured gateway answers 200 with a page instead of NDJSON: nothing parses.
         assertStreamWithoutDoneFails("<html>not json</html>\n", "text/html", List.of());
+    }
+
+    @Test
+    public void test_streamChat_reportsUsageOnceAfterTheLastChunk() throws Exception {
+        final String body = "{\"model\":\"gemma4:test\",\"message\":{\"content\":\"Hello\"},\"done\":false}\n"
+                + "{\"model\":\"gemma4:test\",\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\","
+                + "\"prompt_eval_count\":12,\"eval_count\":48}\n";
+        final List<String> events = new ArrayList<>();
+        final List<LlmUsage> usages = new ArrayList<>();
+        streamAndRecordUsage(body, events, usages);
+        assertEquals(1, usages.size());
+        assertEquals(new LlmUsage(12, 48, null, "gemma4:test"), usages.get(0));
+        // The totals belong to the finished call: they arrive after the final chunk, not before.
+        assertEquals(List.of("chunk", "chunk", "usage"), events);
+    }
+
+    @Test
+    public void test_streamChat_reportsOnlyWhatOllamaSent() throws Exception {
+        // A count Ollama leaves out is unknown (null), not zero.
+        final List<LlmUsage> usages = new ArrayList<>();
+        streamAndRecordUsage(
+                "{\"message\":{\"content\":\"hi\"},\"done\":false}\n"
+                        + "{\"model\":\"gemma4:test\",\"message\":{\"content\":\"\"},\"done\":true,\"eval_count\":7}\n",
+                new ArrayList<>(), usages);
+        assertEquals(List.of(new LlmUsage(null, 7, null, "gemma4:test")), usages);
+    }
+
+    @Test
+    public void test_streamChat_reportsNothingWhenOllamaSentNothing() throws Exception {
+        final List<LlmUsage> usages = new ArrayList<>();
+        streamAndRecordUsage("{\"message\":{\"content\":\"hi\"},\"done\":false}\n" + "{\"message\":{\"content\":\"\"},\"done\":true}\n",
+                new ArrayList<>(), usages);
+        assertTrue(usages.isEmpty());
+    }
+
+    @Test
+    public void test_streamChat_noUsageForAStreamThatEndedWithoutDone() throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson")
+                .setBody("{\"model\":\"gemma4:test\",\"message\":{\"content\":\"cut\"},\"done\":false,\"eval_count\":3}\n"));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            final List<LlmUsage> usages = new ArrayList<>();
+            try {
+                localClient.streamChat(request, new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String content, final boolean done) {
+                    }
+
+                    @Override
+                    public void onUsage(final LlmUsage usage) {
+                        usages.add(usage);
+                    }
+                });
+                fail("expected LlmException");
+            } catch (final LlmException e) {
+                // expected: the answer was cut short
+            }
+            assertTrue("a call that did not finish has no totals to report", usages.isEmpty());
+        } finally {
+            server.shutdown();
+        }
+    }
+
+    private void streamAndRecordUsage(final String body, final List<String> events, final List<LlmUsage> usages) throws Exception {
+        final MockWebServer server = new MockWebServer();
+        server.enqueue(new MockResponse().setHeader("Content-Type", "application/x-ndjson").setBody(body));
+        server.start();
+        try {
+            final TestableOllamaLlmClient localClient = new TestableOllamaLlmClient();
+            localClient.setTestApiUrl(server.url("/").toString().replaceAll("/$", ""));
+            localClient.initHttpClient();
+            final LlmChatRequest request = new LlmChatRequest();
+            request.setMessages(List.of(new LlmMessage("user", "hi")));
+            localClient.streamChat(request, new LlmStreamCallback() {
+                @Override
+                public void onChunk(final String content, final boolean done) {
+                    events.add("chunk");
+                }
+
+                @Override
+                public void onUsage(final LlmUsage usage) {
+                    events.add("usage");
+                    usages.add(usage);
+                }
+            });
+        } finally {
+            server.shutdown();
+        }
     }
 
     private void assertStreamWithoutDoneFails(final String body, final String contentType, final List<String> expectedChunks)
