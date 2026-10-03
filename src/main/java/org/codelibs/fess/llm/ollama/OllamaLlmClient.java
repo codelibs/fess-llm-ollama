@@ -51,6 +51,7 @@ import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.llm.LlmUsage;
 import org.codelibs.fess.ollama.OllamaUrlUtil;
 import org.codelibs.fess.util.CredentialUrlUtil;
 import org.codelibs.fess.util.ComponentUtil;
@@ -404,6 +405,9 @@ public class OllamaLlmClient extends AbstractLlmClient {
         long evalDurationNs = 0L;
         int promptEvalCount = 0;
         int evalCount = 0;
+        Integer reportedPromptTokens = null;
+        Integer reportedCompletionTokens = null;
+        String reportedModel = null;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
             String line;
             try {
@@ -450,6 +454,10 @@ public class OllamaLlmClient extends AbstractLlmClient {
                             evalDurationNs = jsonNode.path("eval_duration").asLong(0L);
                             promptEvalCount = jsonNode.path("prompt_eval_count").asInt(0);
                             evalCount = jsonNode.path("eval_count").asInt(0);
+                            // A count Ollama leaves out is reported as unknown, not as 0.
+                            reportedPromptTokens = jsonNode.hasNonNull("prompt_eval_count") ? promptEvalCount : null;
+                            reportedCompletionTokens = jsonNode.hasNonNull("eval_count") ? evalCount : null;
+                            reportedModel = jsonNode.path("model").asText(null);
                             break;
                         }
                     } catch (final JacksonException e) {
@@ -482,6 +490,13 @@ public class OllamaLlmClient extends AbstractLlmClient {
             logger.warn("[LLM:OLLAMA] Stream ended without a done message. chunkCount={}, objectCount={}, parseErrorCount={}, model={}",
                     chunkCount, objectCount, parseErrorCount, model);
             throw new LlmException("Ollama stream ended without a done message", LlmException.ERROR_INVALID_RESPONSE);
+        }
+
+        // The done object carries the totals of the whole call; without this the caller would count the
+        // call but none of its tokens (the synchronous chat() reports them through its response).
+        final LlmUsage usage = new LlmUsage(reportedPromptTokens, reportedCompletionTokens, null, reportedModel);
+        if (!usage.isEmpty()) {
+            callback.onUsage(usage);
         }
 
         if (doneReason != null && !NORMAL_DONE_REASONS.contains(doneReason)) {
